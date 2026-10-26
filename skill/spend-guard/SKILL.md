@@ -28,6 +28,13 @@ The generated `sessionStart` hook automatically adds the capped notes and a dete
 most recently modified previous chat in the same workspace to startup context. It reads local session logs
 only, makes no model call, and fails open if the input or logs are unavailable.
 
+An optional `spendguard.py graph <folder>` command builds a local deterministic code graph from supported
+source files using the Python standard library. It records only relative paths, symbol names, imports and
+SHA-256 fingerprints; it excludes secret-looking files, symlinks, dependency/build directories and files
+over 200 KB. It makes no network or model calls and writes `GRAPH_REPORT.md` under
+`.github/spend-guard-graph/`. The startup hook includes only the bounded report, never the graph or source
+contents.
+
 Run the script as `python "<this skill folder>/spendguard.py" <command>` (on macOS/Linux `python3`).
 
 ## Setup in a project (`/spend-guard` or "set up spend-guard")
@@ -75,6 +82,7 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
   one or two concrete suggestions.
 - **tiers** (`spendguard.py tiers [--init]`): show the model tiers; `--init` writes an editable copy to
   `~/.copilot/spend-guard/tiers.json`. After editing, run `update` in each project.
+- **graph** (`spendguard.py graph <folder>`): build or incrementally update the local code graph and report.
 
 ## Plan schema
 

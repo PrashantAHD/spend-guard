@@ -9,7 +9,7 @@ models only for the work that needs them.
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Copilot](https://img.shields.io/badge/GitHub%20Copilot-agents-000000?logo=githubcopilot&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-2EA44F)
-![Tests](https://img.shields.io/badge/tests-20%20passing-2EA44F)
+![Tests](https://img.shields.io/badge/tests-23%20passing-2EA44F)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
 </div>
@@ -39,10 +39,31 @@ long-running chat cost more than half the total.
 | ✂️ | **Short chats** | A hook watches the chat's size. Past ~100k tokens it asks the agent to move a *new* task to a fresh chat with a short handoff |
 | 📝 | **Project handoff notes** | Each project gets a small `.github/notes.md` file for durable decisions and half-done work, so new chats read context without carrying full history |
 | 🚀 | **Automatic startup context** | A fast `sessionStart` hook adds capped notes and the previous same-workspace chat's recent user messages and final answer, with no model call |
+| 🕸️ | **Local code graph** | An optional standard-library graph extracts code files, symbols and imports locally, caches unchanged files by SHA-256, and adds a small report to startup context |
 | 📵 | **No whole big files** | Large reference files and huge source files are searched, never read whole |
 | 📊 | **Spend report** | Cost per project and model from your local Copilot logs, compared with the previous period |
 
 You don't pick agents or models: open a chat and ask. The routing happens on its own.
+
+## Cost-saving strategy in use
+
+We use this strategy in two production workspaces as well as in Spend-Guard itself:
+
+| Project | How the strategy is applied |
+|---|---|
+| [AUTO-C / PipeTrace](https://github.com/PrashantAHD/pipetrace) | Luna is the cheap default for routine piping-tool work, documentation, validation and git. Code changes go to a standard developer. Sketches and drawings use an Opus reader plus an independent GPT-6 Astra checker; disagreements are sent to the contractor. The cost guard keeps new cases out of long chats, while startup context restores the notes and previous-chat digest automatically. |
+| [Agent Doorbell](https://github.com/PrashantAHD/Agent-Doorbell) | Luna is the cheap default for tests, reinstall, health checks, logs, documentation and git. Code changes go to a standard developer, while authentication, signing, Telegram approvals/buttons, session grants and hook or extension changes receive an Opus security review. The cost guard and automatic startup context keep handoffs short and inexpensive. |
+
+These two projects are hand-maintained integrations rather than Spend-Guard-managed
+installations. Both use the same principles: spend the cheap model on predictable work,
+reserve stronger models for code, security and accuracy-critical decisions, and carry only
+a capped local handoff into a new chat instead of the full conversation history.
+
+The optional graph feature deliberately uses only local code structure. It does not call a
+model, access the network, process PDFs or images, run an MCP server, or start a watcher.
+It excludes secret-looking files, dependency/build directories, symlinks and code files over
+200 KB. Generated graph data is kept under `.github/spend-guard-graph/`; review it before
+committing it because paths and symbol names can still reveal project structure.
 
 ### Model tiers
 
@@ -108,6 +129,7 @@ The skill runs these for you; you can also run them yourself:
 | `python spendguard.py remove <folder>` | Remove everything Spend-Guard created |
 | `python spendguard.py report [--days 7]` | Cost per project and model, vs the previous period |
 | `python spendguard.py tiers [--init]` | Show or customise the model tiers |
+| `python spendguard.py graph <folder>` | Build a local deterministic code graph and bounded `GRAPH_REPORT.md` |
 
 The script is in `~/.copilot/skills/spend-guard/` after installing. Plan format: see
 [SKILL.md](skill/spend-guard/SKILL.md#plan-schema).

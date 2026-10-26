@@ -16,8 +16,10 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import ast
 import collections
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -30,6 +32,9 @@ SECTION_START = "<!-- spend-guard:start -->"
 SECTION_END = "<!-- spend-guard:end -->"
 PLAN_FILE = Path(".github") / "spend-guard.json"
 NOTES_FILE = Path(".github") / "notes.md"
+GRAPH_DIR = Path(".github") / "spend-guard-graph"
+GRAPH_FILE = GRAPH_DIR / "graph.json"
+GRAPH_REPORT = GRAPH_DIR / "GRAPH_REPORT.md"
 COPILOT_HOME = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
 TIERS_OVERRIDE = COPILOT_HOME / "spend-guard" / "tiers.json"
 
@@ -57,6 +62,12 @@ SECRET_FILES = re.compile(r"(^|[\\/])(\.env(\..*)?|.*\.pem|.*\.key|.*\.pfx|id_rs
                           r"credentials.*)$", re.I)
 SECRET_VALUE = re.compile(r"""["']?(?:[a-z_]*token|secret|password|passwd|api[_-]?key|client[_-]?secret|"""
                           r"""private[_-]?key|access[_-]?key)["']?\s*[:=]\s*["']?[A-Za-z0-9_\-./+=:]{12,}""", re.I)
+GRAPH_MAX_BYTES = 200_000
+GRAPH_EXTENSIONS = set(LANG_EXT)
+GRAPH_IMPORT = re.compile(r"^\s*(?:import\s+([A-Za-z_][\w.]*)|from\s+([A-Za-z_][\w.]*)\s+import)", re.M)
+GRAPH_DEFINITION = re.compile(
+    r"^\s*(?:export\s+)?(?:(?:async\s+)?function|class|func|type|def|interface|struct|"
+    r"module|trait)\s+([A-Za-z_][\w]*)", re.M)
 
 
 def _has_secret(path: Path) -> bool:
@@ -616,10 +627,17 @@ def main():
         if notes_path.exists():
             notes = "\n".join(notes_path.read_text(encoding="utf-8", errors="replace")
                                .splitlines()[-MAX_NOTES_LINES:])
+        graph = ""
+        graph_path = Path(cwd) / ".github" / "spend-guard-graph" / "GRAPH_REPORT.md"
+        if graph_path.exists():
+            graph = "\n".join(graph_path.read_text(encoding="utf-8", errors="replace")
+                              .splitlines()[:40])
         previous = _previous(home, current, cwd)
         context = "Spend-Guard startup context\n"
         if notes:
             context += "\nProject notes:\n" + notes
+        if graph:
+            context += "\n\nLocal code graph summary:\n" + graph
         if previous:
             context += "\n\n" + previous
         return json.dumps({"additionalContext": context[-MAX_CONTEXT:]}) if context.strip() else "{}"
@@ -826,6 +844,128 @@ def remove(folder: Path, dry: bool = False) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# local code graph
+# ---------------------------------------------------------------------------
+
+def _graph_files(folder: Path):
+    for root, dirs, names in os.walk(folder, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.endswith(".worktrees")
+                   and (not d.startswith(".") or d in (".github", ".vscode"))]
+        for name in names:
+            path = Path(root) / name
+            if path.is_symlink() or path.suffix.lower() not in GRAPH_EXTENSIONS:
+                continue
+            rel = path.relative_to(folder).as_posix()
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > GRAPH_MAX_BYTES or SECRET_FILES.search(rel):
+                continue
+            yield path, rel
+
+
+def _graph_extract(path: Path, rel: str) -> tuple[list[dict], list[dict]]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [], []
+    module = "file:" + rel
+    nodes = [{"id": module, "kind": "file", "path": rel, "evidence": "EXTRACTED"}]
+    edges = []
+    if path.suffix.lower() == ".py":
+        try:
+            tree = ast.parse(text, filename=rel)
+        except SyntaxError:
+            tree = None
+        if tree is not None:
+            for item in ast.walk(tree):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    ident = module + ":" + item.name
+                    nodes.append({"id": ident, "kind": "symbol", "name": item.name, "path": rel,
+                                  "evidence": "EXTRACTED"})
+                    edges.append({"from": module, "to": ident, "kind": "defines", "evidence": "EXTRACTED"})
+                elif isinstance(item, ast.Import):
+                    imports = [alias.name for alias in item.names]
+                    edges.extend({"from": module, "to": "module:" + name, "kind": "imports",
+                                  "evidence": "EXTRACTED"} for name in imports)
+                elif isinstance(item, ast.ImportFrom) and item.module:
+                    edges.append({"from": module, "to": "module:" + item.module, "kind": "imports",
+                                  "evidence": "EXTRACTED"})
+            return nodes, edges
+    for match in GRAPH_DEFINITION.finditer(text):
+        ident = module + ":" + match.group(1)
+        nodes.append({"id": ident, "kind": "symbol", "name": match.group(1), "path": rel,
+                      "evidence": "EXTRACTED"})
+        edges.append({"from": module, "to": ident, "kind": "defines", "evidence": "EXTRACTED"})
+    for match in GRAPH_IMPORT.finditer(text):
+        name = match.group(1) or match.group(2)
+        edges.append({"from": module, "to": "module:" + name, "kind": "imports",
+                      "evidence": "EXTRACTED"})
+    return nodes, edges
+
+
+def _write_json_atomic(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    os.replace(tmp, path)
+
+
+def build_graph(folder: Path) -> dict:
+    """Build a local, deterministic code graph without network or model calls."""
+    folder = folder.resolve()
+    old = {}
+    graph_path = folder / GRAPH_FILE
+    if graph_path.exists():
+        try:
+            saved = json.loads(graph_path.read_text(encoding="utf-8"))
+            old = saved.get("files") or {}
+        except (OSError, ValueError):
+            old = {}
+    files, all_nodes, all_edges = {}, {}, {}
+    for path, rel in _graph_files(folder):
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        cached = old.get(rel)
+        if cached and cached.get("sha256") == digest:
+            nodes, edges = cached.get("nodes", []), cached.get("edges", [])
+        else:
+            nodes, edges = _graph_extract(path, rel)
+        files[rel] = {"sha256": digest, "nodes": nodes, "edges": edges}
+        for node in nodes:
+            all_nodes[node["id"]] = node
+        for edge in edges:
+            all_edges[json.dumps(edge, sort_keys=True)] = edge
+    graph = {
+        "version": 1,
+        "description": "local deterministic code graph; no network or model calls",
+        "files": files,
+        "nodes": sorted(all_nodes.values(), key=lambda n: n["id"]),
+        "edges": sorted(all_edges.values(), key=lambda e: (e["from"], e["to"], e["kind"])),
+    }
+    _write_json_atomic(graph_path, graph)
+    report_lines = [
+        "<!-- managed by spend-guard -->",
+        "# Spend-Guard local code graph",
+        "",
+        "This report is generated locally from code structure only. It contains no source text, "
+        "secrets, network data or model-generated inferences. It makes no network or model calls.",
+        "",
+        f"- Files indexed: {len(files)}",
+        f"- Nodes: {len(graph['nodes'])}",
+        f"- Edges: {len(graph['edges'])}",
+        "",
+        "## Relationships",
+    ]
+    for edge in graph["edges"][:100]:
+        report_lines.append(f"- `{edge['from']}` --{edge['kind']}--> `{edge['to']}` ({edge['evidence']})")
+    report_path = folder / GRAPH_REPORT
+    report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8", newline="\n")
+    return {"files": len(files), "nodes": len(graph["nodes"]), "edges": len(graph["edges"]),
+            "path": str(graph_path)}
+
+
+# ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------
 
@@ -914,6 +1054,8 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--days", type=int, default=7)
     a = sub.add_parser("tiers", help="show model tiers")
     a.add_argument("--init", action="store_true", help=f"write an editable copy to {TIERS_OVERRIDE}")
+    a = sub.add_parser("graph", help="build a local deterministic code graph")
+    a.add_argument("folder", type=Path)
     args = ap.parse_args(argv)
     try:
         if args.cmd == "analyze":
@@ -933,6 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
                     TIERS_OVERRIDE.write_text(json.dumps(DEFAULT_TIERS, indent=2) + "\n", encoding="utf-8")
                 print(f"edit {TIERS_OVERRIDE}, then run `spendguard.py update <folder>` in each project")
             print(json.dumps(load_tiers(), indent=2))
+        elif args.cmd == "graph":
+            print(json.dumps(build_graph(args.folder), indent=2))
     except (ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

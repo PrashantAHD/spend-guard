@@ -284,6 +284,41 @@ class GuardTests(Base):
         out = json.loads(self.run_session_start({"sessionId": "current", "cwd": str(self.dir)}, home))
         self.assertIn("Project notes", out["additionalContext"])
 
+    def test_session_start_includes_capped_local_graph_report(self):
+        S.apply(self.dir, PLAN)
+        S.build_graph(self.dir)
+        home = Path(self.tmp.name) / "home"
+        out = json.loads(self.run_session_start({"sessionId": "current", "cwd": str(self.dir)}, home))
+        self.assertIn("Local code graph summary", out["additionalContext"])
+        self.assertLessEqual(len(out["additionalContext"]), 6000)
+
+
+class GraphTests(Base):
+    def test_graph_is_local_deterministic_and_excludes_secrets_and_large_files(self):
+        (self.dir / "src" / "app.py").write_text(
+            "from auth.login import check\n\nclass Service:\n    pass\n", encoding="utf-8")
+        (self.dir / "src" / "ignored.py").write_text("password = 'not-a-real-secret'\n", encoding="utf-8")
+        result = S.build_graph(self.dir)
+        graph = json.loads(self.read(".github/spend-guard-graph/graph.json"))
+        self.assertEqual(result["files"], 3)
+        self.assertIn("file:src/app.py", {n["id"] for n in graph["nodes"]})
+        self.assertIn("file:src/auth/login.py", {n["id"] for n in graph["nodes"]})
+        self.assertNotIn("file:.env", {n["id"] for n in graph["nodes"]})
+        self.assertTrue(all(e["evidence"] == "EXTRACTED" for e in graph["edges"]))
+        self.assertIn("no network or model calls", self.read(".github/spend-guard-graph/GRAPH_REPORT.md"))
+
+    def test_graph_reuses_unchanged_file_cache_and_removes_deleted_files(self):
+        first = S.build_graph(self.dir)
+        graph_path = self.dir / ".github" / "spend-guard-graph" / "graph.json"
+        before = graph_path.read_text(encoding="utf-8")
+        second = S.build_graph(self.dir)
+        self.assertEqual(first, second)
+        self.assertEqual(before, graph_path.read_text(encoding="utf-8"))
+        (self.dir / "src" / "app.py").unlink()
+        S.build_graph(self.dir)
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        self.assertNotIn("src/app.py", graph["files"])
+
 
 class ReportTests(Base):
     def test_report_compares_periods(self):
