@@ -2,7 +2,7 @@
 
 <img src="docs/assets/spend-guard-logo.svg" alt="Spend-Guard logo" width="128">
 
-# 🛡️ Spend-Guard
+# Spend-Guard
 
 **Stop paying top-model prices for routine AI coding work.**
 Spend-Guard sets up any project so GitHub Copilot uses a cheap model by default and calls in stronger
