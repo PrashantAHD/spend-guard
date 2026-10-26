@@ -29,6 +29,7 @@ MARK = "managed by spend-guard"
 SECTION_START = "<!-- spend-guard:start -->"
 SECTION_END = "<!-- spend-guard:end -->"
 PLAN_FILE = Path(".github") / "spend-guard.json"
+NOTES_FILE = Path(".github") / "notes.md"
 COPILOT_HOME = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
 TIERS_OVERRIDE = COPILOT_HOME / "spend-guard" / "tiers.json"
 
@@ -283,6 +284,8 @@ agents: {agents}
 You are the entry point for {plan['project']}{(': ' + plan['summary']) if plan['summary'] else ''}. You run on a
 low-cost model: do routine work yourself and hand the expensive kinds of work to specialist
 subagents on stronger models. Decide this for every request; the user does not pick agents.
+At the start of a new task, read `.github/notes.md` for the short handoff from previous chats. When
+the task finishes, append 1-3 lines with the decision, current state, half-done work or a gotcha.
 {tests}
 ## Routing (decide before doing anything)
 | The request needs... | Do this |
@@ -368,6 +371,8 @@ model: {_models(tier)}{effort}{tools}{hidden}
 {body_extra}{approach_md}
 ## Constraints
 {_bullets(constraints)}
+Read `.github/notes.md` when you need the project's current handoff context; never put secrets or client
+data there.
 
 ## Output Format
 {out} This is returned to the main {plan['main_name']} agent.
@@ -379,6 +384,8 @@ def render_section(plan: dict, tiers: dict) -> str:
              f"New chats here start on a low-cost model (`.vscode/settings.json`). Whichever agent you are, "
              f"route every request yourself; the user does not pick agents. The full routing table is in "
              f"`.github/agents/{slug(plan['main_name'])}.agent.md`:"]
+    lines.append("- At the start of a new task, read `.github/notes.md` for the short handoff from previous chats; "
+                 "append 1-3 lines when the task finishes.")
     for s in plan["specialists"]:
         if s["role"] == "checker":
             continue
@@ -391,13 +398,21 @@ def render_section(plan: dict, tiers: dict) -> str:
     lines += ["", "### Long chats",
               f"`.github/hooks/spend_guard.py` adds a \"[Spend-Guard …]\" note to the message once this chat "
               f"passes ~{plan['guard_tokens'] // 1000}k tokens of context. Continue follow-ups here; move a new task to "
-              "a fresh chat with a short handoff.", SECTION_END]
+              "a fresh chat with a short handoff. Never put secrets or client data in `.github/notes.md`.", SECTION_END]
     return "\n".join(lines) + "\n"
 
 
 GUARD_JSON = """{
   "version": 1,
   "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "powershell": "python .github/hooks/session_start.py",
+        "bash": "python3 .github/hooks/session_start.py",
+        "timeoutSec": 10
+      }
+    ],
     "userPromptTransformed": [
       {
         "type": "command",
@@ -419,6 +434,7 @@ Follow-ups continue normally. Fails open: on any problem the message is left unc
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -443,6 +459,23 @@ def context_tokens(session_id):
     return 0
 
 
+def append_handoff(data, tokens):
+    cwd = data.get("cwd") or data.get("workspace") or data.get("workspaceFolder")
+    if isinstance(cwd, dict):
+        cwd = cwd.get("cwd") or cwd.get("path")
+    if not cwd:
+        return
+    path = Path(str(cwd)) / ".github" / "notes.md"
+    prompt = data.get("transformedPrompt")
+    if not isinstance(prompt, str) or not prompt.strip() or not path.exists():
+        return
+    line = " ".join(prompt.strip().split())[:500]
+    if re.search(r"(^|[\\\\/])(?:config\\.json|\\.env(?:\\b|[.]))", line, re.I):
+        return
+    with path.open("a", encoding="utf-8", newline="\\n") as f:
+        f.write(f"\\n- Cost-guard handoff (~{{tokens // 1000}}k): {{line}}\\n")
+
+
 def main():
     data = json.loads(sys.stdin.buffer.read().decode("utf-8") or "{{}}")
     sid = data.get("sessionId") or data.get("session_id") or ""
@@ -452,12 +485,15 @@ def main():
     tokens = context_tokens(sid)
     if tokens < SOFT_TOKENS:
         return "{{}}"
+    append_handoff(data, tokens)
     note = (
         f"\\n\\n[Spend-Guard: this chat is long (~{{tokens // 1000}}k tokens of history are resent with every "
         "request). Decide whether the request above is a NEW task or a follow-up. Follow-up: ignore this note. "
         "New task: do not start it here. If you have the create_session tool, call it with model "
         f"\\"{{MODEL}}\\", this workspace, a short title, and a prompt containing a handoff (goal, key files, "
-        "decisions and state that matter, max ~15 lines) followed by the user's request verbatim; then reply in "
+        "decisions and state that matter, max ~15 lines). Also append the handoff to `.github/notes.md` before "
+        "moving when the task has a durable decision or half-done state. Never put secrets or client data there. "
+        "Then call create_session with the user's request verbatim; reply in "
         "one line with the link. Otherwise tell the user in one line to start a new chat and give a 3-line "
         "handoff to paste.]"
     )
@@ -471,6 +507,128 @@ if __name__ == "__main__":
         out = "{{}}"
     sys.stdout.write(out)
     sys.stdout.flush()
+'''
+
+
+SESSION_START_PY = r'''"""Spend-Guard sessionStart hook (managed by spend-guard): inexpensive deterministic project context."""
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+MAX_CONTEXT = 6000
+MAX_NOTES_LINES = 60
+MAX_MESSAGE = 700
+
+
+def _cwd(data):
+    value = data.get("cwd") or data.get("workspace") or data.get("workspaceFolder")
+    if isinstance(value, dict):
+        value = value.get("cwd") or value.get("path")
+    return os.path.normcase(os.path.abspath(str(value))) if value else ""
+
+
+def _workspace(path):
+    try:
+        for line in (path / "workspace.yaml").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("cwd:"):
+                return os.path.normcase(os.path.abspath(line[4:].strip().strip('"')))
+    except OSError:
+        pass
+    return ""
+
+
+def _message(record, wanted):
+    found = []
+    def walk(value, key=""):
+        if isinstance(value, dict):
+            for name, child in value.items():
+                low = str(name).lower()
+                if isinstance(child, str) and (low in wanted or low.endswith("content")):
+                    found.append(child)
+                else:
+                    walk(child, low)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, key)
+    walk(record)
+    text = "\n".join(found).strip()
+    safe = [line for line in text.splitlines()
+            if not re.search(r"(^|[\\/])(?:config\.json|\.env(?:\b|[.]))", line, re.I)]
+    return "\n".join(safe).strip()
+
+
+def _previous(home, current, cwd):
+    candidates = []
+    for path in home.glob("session-state/*"):
+        if not path.is_dir() or path.name == current or _workspace(path) != cwd:
+            continue
+        log = path / "events.jsonl"
+        if not log.exists():
+            continue
+        try:
+            head = log.read_bytes()[:200000].lower()
+        except OSError:
+            continue
+        if b'"initiator":"sub-agent"' in head or b'"automation"' in head:
+            continue
+        candidates.append((log.stat().st_mtime, path.name, log))
+    if not candidates:
+        return ""
+    _, sid, log = max(candidates)
+    users, final_assistant = [], ""
+    try:
+        for raw in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                record = json.loads(raw)
+            except ValueError:
+                continue
+            kind = str(record.get("type", "")).lower()
+            if "user.message" in kind:
+                text = _message(record, {"content", "text", "message", "prompt"})
+                if text:
+                    users.append(text)
+            elif "assistant.message" in kind:
+                text = _message(record, {"content", "text", "message", "response"})
+                if text:
+                    final_assistant = text
+    except OSError:
+        return ""
+    parts = [f"Previous chat: {sid}"]
+    parts.extend(f"User: {text[-MAX_MESSAGE:]}" for text in users[-8:])
+    if final_assistant:
+        parts.append(f"Final assistant: {final_assistant[-MAX_MESSAGE:]}")
+    return "\n".join(parts)
+
+
+def main():
+    try:
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8") or "{}")
+        current = data.get("sessionId") or data.get("session_id") or ""
+        cwd = _cwd(data)
+        if not current or not cwd:
+            return "{}"
+        home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
+        notes_path = Path(cwd) / ".github" / "notes.md"
+        notes = ""
+        if notes_path.exists():
+            notes = "\n".join(notes_path.read_text(encoding="utf-8", errors="replace")
+                               .splitlines()[-MAX_NOTES_LINES:])
+        previous = _previous(home, current, cwd)
+        context = "Spend-Guard startup context\n"
+        if notes:
+            context += "\nProject notes:\n" + notes
+        if previous:
+            context += "\n\n" + previous
+        return json.dumps({"additionalContext": context[-MAX_CONTEXT:]}) if context.strip() else "{}"
+    except Exception:
+        return "{}"
+
+
+if __name__ == "__main__":
+    sys.stdout.write(main())
 '''
 
 
@@ -491,6 +649,23 @@ def _write_managed(path: Path, text: str, log: list[str], dry: bool) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8", newline="\n")
     log.append(f"wrote {path.as_posix()}")
+
+
+def _seed_notes(folder: Path, log: list[str], dry: bool) -> None:
+    """Create the user-maintained handoff file once; never rewrite or remove it."""
+    path = folder / NOTES_FILE
+    if path.exists():
+        log.append(f"left {path.as_posix()} alone (user-maintained project notes)")
+        return
+    if not dry:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"# {folder.name} project notes\n\n"
+            "Short handoff from previous chats. Append 1-3 lines when a task finishes: a decision, "
+            "current state, half-done work or a gotcha. Condense older entries when this reaches about "
+            "60 lines. Never put secrets or client data here.\n",
+            encoding="utf-8", newline="\n")
+    log.append(f"wrote {path.as_posix()} (initial project notes)")
 
 
 def _strip_jsonc(text: str) -> str:
@@ -595,9 +770,11 @@ def apply(folder: Path, plan: dict, dry: bool = False) -> list[str]:
     hooks = folder / ".github" / "hooks"
     _write_managed(hooks / "spend_guard.py", GUARD_PY.format(
         mark=MARK, version=VERSION, tokens=plan["guard_tokens"], model=tiers["cheap"]["default_model_id"]), log, dry)
+    _write_managed(hooks / "session_start.py", SESSION_START_PY, log, dry)
     guard_json = GUARD_JSON.replace('"version": 1,', f'"version": 1,\n  "description": "{MARK}",')
     _write_managed(hooks / "spend-guard.json", guard_json, log, dry)
     _section(folder, render_section(plan, tiers), log, dry)
+    _seed_notes(folder, log, dry)
     created = _settings(folder, tiers["cheap"]["default_model_id"], log, dry)
     saved = {**plan, "spend_guard_version": VERSION}
     saved["specialists"] = [s for s in plan["specialists"] if s["role"] != "checker"]

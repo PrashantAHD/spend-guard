@@ -113,11 +113,32 @@ class ApplyTests(Base):
         agents_md = self.read("AGENTS.md")
         self.assertIn(S.SECTION_START, agents_md)
         self.assertIn("independent second pass", agents_md)
+        self.assertIn("`.github/notes.md`", agents_md)
+        self.assertIn("`.github/notes.md`", main)
+        self.assertTrue((self.dir / ".github" / "notes.md").exists())
         self.assertIn('"chat.defaultModel": "gpt-5.6-luna"', self.read(".vscode/settings.json"))
         hook = json.loads(self.read(".github/hooks/spend-guard.json"))
         self.assertIn("userPromptTransformed", hook["hooks"])
+        self.assertIn("sessionStart", hook["hooks"])
+        self.assertTrue((self.dir / ".github" / "hooks" / "session_start.py").exists())
         saved = json.loads(self.read(".github/spend-guard.json"))
         self.assertEqual(len(saved["specialists"]), 3)            # the checker is derived, not saved
+
+    def test_notes_are_seeded_once_and_preserved(self):
+        S.apply(self.dir, PLAN)
+        notes = self.dir / ".github" / "notes.md"
+        seeded = notes.read_text(encoding="utf-8")
+        self.assertIn("Append 1-3 lines", seeded)
+        notes.write_text(seeded + "\nDecision: keep the handoff short.\n", encoding="utf-8")
+        S.apply(self.dir, S.load_plan(self.dir))
+        self.assertIn("Decision: keep the handoff short.", notes.read_text(encoding="utf-8"))
+        S.remove(self.dir)
+        self.assertTrue(notes.exists())
+        self.assertIn("Decision: keep the handoff short.", notes.read_text(encoding="utf-8"))
+
+    def test_dry_run_does_not_seed_notes(self):
+        S.apply(self.dir, PLAN, dry=True)
+        self.assertFalse((self.dir / ".github" / "notes.md").exists())
 
     def test_idempotent_and_preserves_existing_agents_md(self):
         (self.dir / "AGENTS.md").write_text("# Guide\n\nKeep this.\n", encoding="utf-8")
@@ -227,6 +248,41 @@ class GuardTests(Base):
         bad = subprocess.run([sys.executable, str(self.dir / ".github" / "hooks" / "spend_guard.py")],
                              input=b"not json", capture_output=True, env=env, timeout=20)
         self.assertEqual(bad.stdout, b"{}")
+
+    def run_session_start(self, payload, home):
+        out = subprocess.run([sys.executable, str(self.dir / ".github" / "hooks" / "session_start.py")],
+                             input=json.dumps(payload).encode(), capture_output=True,
+                             env=dict(os.environ, COPILOT_HOME=str(home)), timeout=20)
+        return out.stdout.decode()
+
+    def test_session_start_uses_previous_same_workspace_and_caps(self):
+        S.apply(self.dir, PLAN)
+        home = Path(self.tmp.name) / "home"
+        previous = home / "session-state" / "previous"
+        previous.mkdir(parents=True)
+        (previous / "workspace.yaml").write_text(f"cwd: {self.dir}\n", encoding="utf-8")
+        events = [
+            {"type": "user.message", "content": f"work item {i} " + ("x" * 1000)} for i in range(10)
+        ]
+        events.append({"type": "assistant.message", "content": "Finished the relevant feature."})
+        (previous / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
+        other = home / "session-state" / "other"
+        other.mkdir(parents=True)
+        (other / "workspace.yaml").write_text(f"cwd: {self.tmp.name}\\other\n", encoding="utf-8")
+        (other / "events.jsonl").write_text(json.dumps({"type": "user.message", "content": "wrong workspace"}),
+                                            encoding="utf-8")
+        out = json.loads(self.run_session_start({"sessionId": "current", "cwd": str(self.dir)}, home))
+        self.assertLessEqual(len(out["additionalContext"]), 6000)
+        self.assertIn("Previous chat: previous", out["additionalContext"])
+        self.assertIn("Finished the relevant feature.", out["additionalContext"])
+        self.assertNotIn("wrong workspace", out["additionalContext"])
+
+    def test_session_start_fails_open_on_bad_input_or_missing_logs(self):
+        S.apply(self.dir, PLAN)
+        home = Path(self.tmp.name) / "home"
+        self.assertEqual(self.run_session_start({}, home), "{}")
+        out = json.loads(self.run_session_start({"sessionId": "current", "cwd": str(self.dir)}, home))
+        self.assertIn("Project notes", out["additionalContext"])
 
 
 class ReportTests(Base):

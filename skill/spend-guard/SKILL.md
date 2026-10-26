@@ -19,6 +19,15 @@ The mechanical part is [spendguard.py](./spendguard.py) (standard library only);
 understanding the project and proposing the right specialists. Never overwrite files Spend-Guard didn't
 create; the script already refuses to.
 
+Each applied project also gets `.github/notes.md` when that file is missing. It is a short, user-maintained
+handoff: append 1-3 lines at task completion with a decision, current state, half-done work or a gotcha.
+Condense older entries around 60 lines. Never put secrets or client data there. Update and remove leave it
+untouched.
+
+The generated `sessionStart` hook automatically adds the capped notes and a deterministic digest of the
+most recently modified previous chat in the same workspace to startup context. It reads local session logs
+only, makes no model call, and fails open if the input or logs are unavailable.
+
 Run the script as `python "<this skill folder>/spendguard.py" <command>` (on macOS/Linux `python3`).
 
 ## Setup in a project (`/spend-guard` or "set up spend-guard")
@@ -54,7 +63,7 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
    Spend-Guard), tell the user; don't work around it.
 6. **Report back** in a few lines: what each agent does and which model, what was skipped, and that new chats
    in this project start on the cheap model. Suggest committing `.github/agents/`, `.github/hooks/`,
-   `.github/spend-guard.json`, `AGENTS.md` and `.vscode/settings.json`.
+   `.github/spend-guard.json`, `.github/notes.md`, `AGENTS.md` and `.vscode/settings.json`.
 
 ## Other commands
 

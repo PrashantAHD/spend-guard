@@ -9,7 +9,7 @@ models only for the work that needs them.
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Copilot](https://img.shields.io/badge/GitHub%20Copilot-agents-000000?logo=githubcopilot&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-2EA44F)
-![Tests](https://img.shields.io/badge/tests-16%20passing-2EA44F)
+![Tests](https://img.shields.io/badge/tests-20%20passing-2EA44F)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
 </div>
@@ -37,6 +37,8 @@ long-running chat cost more than half the total.
 | 🧭 | **Automatic hand-off** | A main agent does routine work itself and delegates to specialists on stronger models: a developer for code, a read-only reviewer for security-sensitive changes, an accurate reader for critical documents |
 | 🔁 | **Independent second pass** | For accuracy-critical extraction (handwriting, scans, invoices), a checker on a *different model family* re-reads the same locations without seeing the first answers; disagreements go to you |
 | ✂️ | **Short chats** | A hook watches the chat's size. Past ~100k tokens it asks the agent to move a *new* task to a fresh chat with a short handoff |
+| 📝 | **Project handoff notes** | Each project gets a small `.github/notes.md` file for durable decisions and half-done work, so new chats read context without carrying full history |
+| 🚀 | **Automatic startup context** | A fast `sessionStart` hook adds capped notes and the previous same-workspace chat's recent user messages and final answer, with no model call |
 | 📵 | **No whole big files** | Large reference files and huge source files are searched, never read whole |
 | 📊 | **Spend report** | Cost per project and model from your local Copilot logs, compared with the previous period |
 
@@ -81,12 +83,18 @@ AGENTS.md                         # a marked "Model routing" section (the rest o
 .github/agents/<specialist>.agent.md
 .github/hooks/spend-guard.json    # the long-chat guard hook
 .github/hooks/spend_guard.py
+.github/hooks/session_start.py  # automatic capped startup context from notes + previous chat
+.github/hooks/spend-guard.json   # hook registration
+.github/notes.md                 # short user-maintained handoff notes (created once, never overwritten)
 .github/spend-guard.json          # the plan, so it can be updated or removed
 .vscode/settings.json             # chat.defaultModel = the cheap model
 ```
 
 Files are marked *managed by spend-guard*. It **never overwrites a file it didn't create**: it skips it and
-tells you. `remove` deletes only its own files and its section of `AGENTS.md`.
+tells you. `.github/notes.md` is deliberately user-maintained: Spend-Guard creates it only when missing and
+never overwrites or deletes it. Append 1-3 lines after a task with the decision, current state, half-done work
+or a gotcha; condense older entries around 60 lines. Never put secrets or client data there. `remove` deletes
+only its own files and its section of `AGENTS.md`.
 
 ## Commands
 
