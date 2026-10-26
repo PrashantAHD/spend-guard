@@ -11,7 +11,7 @@ models only for the work that needs them.
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Copilot](https://img.shields.io/badge/GitHub%20Copilot-agents-000000?logo=githubcopilot&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-2EA44F)
-![Tests](https://img.shields.io/badge/tests-23%20passing-2EA44F)
+![Tests](https://img.shields.io/badge/tests-25%20passing-2EA44F)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
 </div>
@@ -37,6 +37,7 @@ long-running chat cost more than half the total.
 |---|---|---|
 | 💸 | **Cheap by default** | New chats in the project start on a low-cost model (`chat.defaultModel`) |
 | 🧭 | **Automatic hand-off** | A main agent does routine work itself and delegates to specialists on stronger models: a developer for code, a read-only reviewer for security-sensitive changes, an accurate reader for critical documents |
+| 🧩 | **Claude Skills support** | Optionally generates Claude Code `SKILL.md` files and a marked `CLAUDE.md` routing section from the same plan |
 | 🔁 | **Independent second pass** | For accuracy-critical extraction (handwriting, scans, invoices), a checker on a *different model family* re-reads the same locations without seeing the first answers; disagreements go to you |
 | ✂️ | **Short chats** | A hook watches the chat's size. Past ~100k tokens it asks the agent to move a *new* task to a fresh chat with a short handoff |
 | 📝 | **Project handoff notes** | Each project gets a small `.github/notes.md` file for durable decisions and half-done work, so new chats read context without carrying full history |
@@ -231,6 +232,14 @@ AGENTS.md
 .vscode/settings.json
 ```
 
+When Claude support is enabled in the plan, it also creates:
+
+```text
+CLAUDE.md                         # a marked Spend-Guard routing section
+.claude/skills/spend-guard/SKILL.md
+.claude/skills/<specialist>/SKILL.md
+```
+
 `.github/notes.md` is created only when missing and is never overwritten or deleted by
 Spend-Guard. It contains short handoffs, never secrets or client data.
 
@@ -251,6 +260,18 @@ python "$env:USERPROFILE\.copilot\skills\spend-guard\spendguard.py" apply . --pl
 
 The plan format is documented in [SKILL.md](skill/spend-guard/SKILL.md#plan-schema). Review
 `.github/spend-guard.json` after applying.
+
+To generate Claude Code skills as well as Copilot agents, add this to the plan:
+
+```json
+{
+  "providers": ["copilot", "claude"]
+}
+```
+
+The default is `["copilot"]`, so existing setups are unchanged. Claude skill files are local,
+marked as managed, and are never created by default or used to overwrite an existing
+`CLAUDE.md` file.
 
 ### Optional secure local code graph
 

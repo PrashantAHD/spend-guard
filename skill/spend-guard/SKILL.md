@@ -15,6 +15,11 @@ Sets a project up so every task gets the model it actually needs:
 | accurate | security reviews and accuracy-critical work |
 | checker | an independent second pass from a different model family |
 
+Spend-Guard can generate the same routing policy for Copilot and Claude Code. Copilot remains the
+default provider for backwards compatibility; add `"providers": ["copilot", "claude"]` to a plan
+to generate `.claude/skills/` and a marked `CLAUDE.md` section as well. Existing Claude files are
+never overwritten.
+
 The mechanical part is [spendguard.py](./spendguard.py) (standard library only); your job is the judgement:
 understanding the project and proposing the right specialists. Never overwrite files Spend-Guard didn't
 create; the script already refuses to.
@@ -93,6 +98,7 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
   "summary": "REST API that issues invoices",
   "routine": ["running tests", "small edits", "docs", "git"],
   "test_command": "python -m pytest",
+  "providers": ["copilot", "claude"],
   "avoid_files": ["data/rates.csv"],
   "rules": ["Never read or print `.env`."],
   "guard_tokens": 100000,

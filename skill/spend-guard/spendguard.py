@@ -30,6 +30,8 @@ VERSION = "1.0.0"
 MARK = "managed by spend-guard"
 SECTION_START = "<!-- spend-guard:start -->"
 SECTION_END = "<!-- spend-guard:end -->"
+CLAUDE_SECTION_START = "<!-- spend-guard:claude:start -->"
+CLAUDE_SECTION_END = "<!-- spend-guard:claude:end -->"
 PLAN_FILE = Path(".github") / "spend-guard.json"
 NOTES_FILE = Path(".github") / "notes.md"
 GRAPH_DIR = Path(".github") / "spend-guard-graph"
@@ -195,6 +197,11 @@ def validate_plan(plan: dict, tiers: dict) -> dict:
         if not isinstance(p[key], list):
             raise ValueError(f"'{key}' must be a list")
     p.setdefault("test_command", "")
+    p.setdefault("providers", ["copilot"])
+    if not isinstance(p["providers"], list) or not p["providers"] or any(
+            provider not in ("copilot", "claude") for provider in p["providers"]):
+        raise ValueError("'providers' must be a non-empty list containing only 'copilot' or 'claude'")
+    p["providers"] = list(dict.fromkeys(p["providers"]))
     p["guard_tokens"] = int(p.get("guard_tokens") or 100_000)
     names = {p["main_name"]}
     out = []
@@ -387,6 +394,64 @@ data there.
 
 ## Output Format
 {out} This is returned to the main {plan['main_name']} agent.
+"""
+
+
+def render_claude_main(plan: dict) -> str:
+    rows = []
+    for s in plan["specialists"]:
+        if s["role"] == "checker":
+            continue
+        action = f"invoke `{slug(s['name'])}`" + (" with an independent checker" if s["double_check"] else "")
+        rows.append(f"| {s['when']} | {action} |")
+    rows.append(f"| {', '.join(plan['routine']) or 'Routine work'} | Do it yourself |")
+    return f"""---
+name: spend-guard
+description: {_yaml_str(f"Route {plan['project']} work to the appropriate cost and accuracy tier.")}
+---
+<!-- {MARK} {VERSION}: generated for Claude Code; edit the plan and run `spendguard.py update` -->
+# Spend-Guard routing for {plan['project']}
+
+This project uses Spend-Guard to keep routine work inexpensive while reserving stronger Claude
+models for code, security and accuracy-critical work. Read `.github/notes.md` at the start of
+a new task and append a 1-3 line durable handoff when the task finishes. Never put secrets or
+client data in the notes.
+
+## Routing
+| The request needs... | Do this |
+|---|---|
+{chr(10).join(rows)}
+
+## Constraints
+{_bullets(_common_constraints(plan) + ["Do not read a specialist's results and redo its work yourself."])}
+"""
+
+
+def render_claude_specialist(s: dict, plan: dict) -> str:
+    role = s["role"]
+    if role == "checker":
+        intro = f"Independently check the work of `{slug(s['for'])}` without reading its results."
+    elif role == "developer":
+        intro = f"Implement code changes for {plan['project']} as the standard-tier developer."
+    elif role == "reviewer":
+        intro = f"Perform a read-only accurate security review for {plan['project']}."
+    elif role == "extractor":
+        intro = f"Extract information accurately for {plan['project']}."
+    else:
+        intro = f"Act as a specialist for {plan['project']}."
+    extra = s["instructions"].strip()
+    return f"""---
+name: {_yaml_str(slug(s['name']))}
+description: {_yaml_str(s['when'])}
+---
+<!-- {MARK} {VERSION}: generated for Claude Code; edit the plan and run `spendguard.py update` -->
+{intro}
+
+{extra}
+
+## Constraints
+{_bullets(_common_constraints(plan) + (["Read-only: do not edit, create or delete files."]
+                                         if s["read_only"] else []))}
 """
 
 
@@ -768,6 +833,48 @@ def _section(folder: Path, section: str | None, log: list[str], dry: bool) -> No
     log.append(f"wrote the Spend-Guard section in {path.as_posix()}")
 
 
+def _claude_section(folder: Path, section: str | None, log: list[str], dry: bool) -> None:
+    path = folder / "CLAUDE.md"
+    text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    pattern = re.compile(re.escape(CLAUDE_SECTION_START) + r".*?" + re.escape(CLAUDE_SECTION_END) + r"\n?", re.S)
+    if section is None:
+        if not pattern.search(text):
+            return
+        new = pattern.sub("", text).rstrip() + "\n"
+        if not dry:
+            if new.strip():
+                path.write_text(new, encoding="utf-8", newline="\n")
+            else:
+                path.unlink()
+        log.append(f"removed the Spend-Guard section from {path.as_posix()}")
+        return
+    if pattern.search(text):
+        new = pattern.sub(lambda _m: section, text)
+    elif text.strip():
+        new = text.rstrip() + "\n\n" + section
+    else:
+        new = section
+    if new == text:
+        log.append(f"unchanged {path.as_posix()}")
+        return
+    if not dry:
+        path.write_text(new, encoding="utf-8", newline="\n")
+    log.append(f"wrote the Spend-Guard section in {path.as_posix()}")
+
+
+def render_claude_section(plan: dict) -> str:
+    lines = [CLAUDE_SECTION_START, "## Spend-Guard routing", "",
+             "Use the Spend-Guard skills under `.claude/skills/` to route work by cost and risk. "
+             "Read `.github/notes.md` at the start of a new task and append a short durable handoff "
+             "when it finishes. Never put secrets or client data in the notes.",
+             f"Main routing skill: `.claude/skills/spend-guard/SKILL.md`."]
+    for s in plan["specialists"]:
+        if s["role"] != "checker":
+            lines.append(f"- {s['when']}: invoke `.claude/skills/{slug(s['name'])}/SKILL.md`.")
+    lines += [CLAUDE_SECTION_END]
+    return "\n".join(lines) + "\n"
+
+
 def apply(folder: Path, plan: dict, dry: bool = False) -> list[str]:
     folder = folder.resolve()
     tiers = load_tiers()
@@ -792,6 +899,28 @@ def apply(folder: Path, plan: dict, dry: bool = False) -> list[str]:
     guard_json = GUARD_JSON.replace('"version": 1,', f'"version": 1,\n  "description": "{MARK}",')
     _write_managed(hooks / "spend-guard.json", guard_json, log, dry)
     _section(folder, render_section(plan, tiers), log, dry)
+    if "claude" in plan["providers"]:
+        claude_skills = folder / ".claude" / "skills"
+        _write_managed(claude_skills / "spend-guard" / "SKILL.md",
+                       render_claude_main(plan), log, dry)
+        wanted_claude = {"spend-guard"}
+        for s in plan["specialists"]:
+            name = slug(s["name"])
+            wanted_claude.add(name)
+            _write_managed(claude_skills / name / "SKILL.md",
+                           render_claude_specialist(s, plan), log, dry)
+        if claude_skills.exists():
+            for skill_dir in claude_skills.iterdir():
+                skill_file = skill_dir / "SKILL.md"
+                if skill_dir.is_dir() and skill_dir.name not in wanted_claude and skill_file.exists() and \
+                        MARK in skill_file.read_text(encoding="utf-8", errors="replace"):
+                    if not dry:
+                        skill_file.unlink()
+                        skill_dir.rmdir()
+                    log.append(f"removed {skill_file.as_posix()} (no longer in the plan)")
+        _claude_section(folder, render_claude_section(plan), log, dry)
+    else:
+        _claude_section(folder, None, log, dry)
     _seed_notes(folder, log, dry)
     created = _settings(folder, tiers["cheap"]["default_model_id"], log, dry)
     saved = {**plan, "spend_guard_version": VERSION}
@@ -828,6 +957,15 @@ def remove(folder: Path, dry: bool = False) -> list[str]:
                     p.unlink()
                 log.append(f"removed {p.as_posix()}")
     _section(folder, None, log, dry)
+    for skill_dir in (folder / ".claude" / "skills").glob("*") if (folder / ".claude" / "skills").exists() else []:
+        skill_file = skill_dir / "SKILL.md"
+        if skill_file.is_file() and MARK in skill_file.read_text(encoding="utf-8", errors="replace"):
+            if not dry:
+                skill_file.unlink()
+                if skill_dir.exists() and not any(skill_dir.iterdir()):
+                    skill_dir.rmdir()
+            log.append(f"removed {skill_file.as_posix()}")
+    _claude_section(folder, None, log, dry)
     plan = {}
     if (folder / PLAN_FILE).exists():
         plan = json.loads((folder / PLAN_FILE).read_text(encoding="utf-8-sig"))
@@ -836,7 +974,8 @@ def remove(folder: Path, dry: bool = False) -> list[str]:
         if not dry:
             (folder / PLAN_FILE).unlink()
         log.append(f"removed {(folder / PLAN_FILE).as_posix()}")
-    for d in (folder / ".github" / "agents", folder / ".github" / "hooks", folder / ".vscode", folder / ".github"):
+    for d in (folder / ".github" / "agents", folder / ".github" / "hooks", folder / ".vscode", folder / ".github",
+              folder / ".claude" / "skills", folder / ".claude"):
         if d.exists() and not any(d.iterdir()) and not dry:
             d.rmdir()
     _ = plan

@@ -140,6 +140,26 @@ class ApplyTests(Base):
         S.apply(self.dir, PLAN, dry=True)
         self.assertFalse((self.dir / ".github" / "notes.md").exists())
 
+    def test_generates_claude_skills_and_preserves_claude_md(self):
+        plan = dict(PLAN, providers=["copilot", "claude"])
+        (self.dir / "CLAUDE.md").write_text("# Local Claude rules\n", encoding="utf-8")
+        S.apply(self.dir, plan)
+        main = self.read(".claude/skills/spend-guard/SKILL.md")
+        developer = self.read(".claude/skills/billing-developer/SKILL.md")
+        claude_md = self.read("CLAUDE.md")
+        self.assertIn("generated for Claude Code", main)
+        self.assertIn("standard-tier developer", developer)
+        self.assertIn("# Local Claude rules", claude_md)
+        self.assertIn(S.CLAUDE_SECTION_START, claude_md)
+        self.assertIn(".claude/skills/spend-guard/SKILL.md", claude_md)
+        S.remove(self.dir)
+        self.assertEqual(self.read("CLAUDE.md"), "# Local Claude rules\n")
+        self.assertFalse((self.dir / ".claude").exists())
+
+    def test_claude_files_are_not_created_by_default(self):
+        S.apply(self.dir, PLAN)
+        self.assertFalse((self.dir / ".claude").exists())
+
     def test_idempotent_and_preserves_existing_agents_md(self):
         (self.dir / "AGENTS.md").write_text("# Guide\n\nKeep this.\n", encoding="utf-8")
         S.apply(self.dir, PLAN)
@@ -212,6 +232,7 @@ class ApplyTests(Base):
         for bad in ({"specialists": [{"name": "X"}]},
                     {"specialists": [{"name": "X", "when": "w", "role": "wizard"}]},
                     {"specialists": [{"name": "X", "when": "w", "tier": "gold"}]},
+                    {"providers": ["copilot", "unknown"]},
                     {"main_name": "X", "specialists": [{"name": "X", "when": "w"}]}):
             with self.assertRaises(ValueError):
                 S.apply(self.dir, bad, dry=True)
