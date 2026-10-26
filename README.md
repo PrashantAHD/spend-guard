@@ -195,6 +195,94 @@ Then open a project, start a **new chat** and type **`/spend-guard`**. The agent
 
 Commit the new files and start new chats as usual.
 
+## Using Spend-Guard in a new tool
+
+### Interactive setup
+
+1. Install Spend-Guard once:
+
+   ```powershell
+   git clone https://github.com/PrashantAHD/spend-guard.git
+   cd spend-guard
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   ```
+
+   On macOS/Linux, run `./install.sh` instead. The skill is installed under
+   `~/.copilot/skills/spend-guard/`.
+
+2. Open the new tool's project folder in VS Code and start a **new** Copilot chat.
+3. Type `/spend-guard`.
+4. Review the project analysis and proposed specialists, then confirm the setup.
+5. Run the project's normal tests and review the generated files before committing them.
+
+Before applying Spend-Guard to company or client code, confirm that your organization's AI policy
+allows changing model routing. Spend-Guard does not send code anywhere new.
+
+The setup normally creates:
+
+```text
+AGENTS.md
+.github/agents/
+.github/hooks/spend-guard.json
+.github/hooks/spend_guard.py
+.github/hooks/session_start.py
+.github/notes.md
+.github/spend-guard.json
+.vscode/settings.json
+```
+
+`.github/notes.md` is created only when missing and is never overwritten or deleted by
+Spend-Guard. It contains short handoffs, never secrets or client data.
+
+### Manual setup
+
+Analyze a project without changing it:
+
+```powershell
+python "$env:USERPROFILE\.copilot\skills\spend-guard\spendguard.py" analyze .
+```
+
+Create a plan using the analysis, then preview and apply it:
+
+```powershell
+python "$env:USERPROFILE\.copilot\skills\spend-guard\spendguard.py" apply . --plan .\plan.json --dry-run
+python "$env:USERPROFILE\.copilot\skills\spend-guard\spendguard.py" apply . --plan .\plan.json
+```
+
+The plan format is documented in [SKILL.md](skill/spend-guard/SKILL.md#plan-schema). Review
+`.github/spend-guard.json` after applying.
+
+### Optional secure local code graph
+
+For a codebase where relationship context is useful, build the local graph explicitly:
+
+```powershell
+python "$env:USERPROFILE\.copilot\skills\spend-guard\spendguard.py" graph .
+```
+
+This writes `.github/spend-guard-graph/graph.json` and `GRAPH_REPORT.md`. It uses no model calls
+or network access, excludes secret-looking files and other strict-risk paths, and adds only the
+bounded report to new-chat startup context. Review the generated graph before committing it.
+
+### Commit and measure
+
+After reviewing the generated configuration:
+
+```powershell
+git add AGENTS.md .github .vscode
+git commit -m "Add Spend-Guard model routing"
+git push
+```
+
+Measure actual usage after several days:
+
+```powershell
+python "$env:USERPROFILE\.copilot\skills\spend-guard\spendguard.py" report --days 7
+```
+
+The report compares local Copilot usage by project and model. The expected 60–85% reduction is
+workload-dependent; your GitHub billing page remains authoritative.
+
 ## What it creates in a project
 
 ```
