@@ -1,0 +1,766 @@
+"""Spend-Guard: keeps coding-agent AI spend down by giving every task the right model for the job.
+
+Sets up a project so routine work runs on a low-cost model and only the work that needs it
+(writing code, security reviews, accuracy-critical reading) goes to stronger models, and keeps
+chats short. Standard library only, Python 3.10+.
+
+Commands:
+    python spendguard.py analyze <folder>                 facts about a project (JSON)
+    python spendguard.py apply <folder> --plan plan.json  generate/refresh the setup from a plan
+    python spendguard.py update <folder>                  re-render from the saved plan (e.g. new model tiers)
+    python spendguard.py remove <folder>                  remove everything Spend-Guard generated
+    python spendguard.py report [--days N]                AI cost per project/model from local Copilot logs
+    python spendguard.py tiers [--init]                   show model tiers (--init writes an editable copy)
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import datetime as dt
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+VERSION = "1.0.0"
+MARK = "managed by spend-guard"
+SECTION_START = "<!-- spend-guard:start -->"
+SECTION_END = "<!-- spend-guard:end -->"
+PLAN_FILE = Path(".github") / "spend-guard.json"
+COPILOT_HOME = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
+TIERS_OVERRIDE = COPILOT_HOME / "spend-guard" / "tiers.json"
+
+DEFAULT_TIERS: dict[str, dict] = {
+    "cheap": {"models": ["GPT-5.6 Luna (copilot)", "GPT-5.4 nano (copilot)"], "default_model_id": "gpt-5.6-luna",
+              "use": "routine work: running tools and tests, small edits, docs, git"},
+    "standard": {"models": ["Claude Sonnet 5.5 (copilot)", "GPT-5.6 Sol (copilot)"],
+                 "use": "writing and fixing code"},
+    "accurate": {"models": ["Claude Opus 5.5 (copilot)"], "reasoning_effort": "high",
+                 "use": "accuracy- or security-critical work"},
+    "checker": {"models": ["GPT-6 Astra (copilot)", "GPT-5.6 Sol (copilot)"], "reasoning_effort": "high",
+                "use": "independent second pass from a different model family"},
+}
+
+ROLES = ("developer", "reviewer", "extractor", "custom")
+SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "env", "__pycache__", "dist", "build", "target", "bin", "obj",
+             ".next", ".tox", ".mypy_cache", ".pytest_cache", "vendor", "coverage", ".idea"}
+LANG_EXT = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript", ".jsx": "JavaScript",
+            ".go": "Go", ".rs": "Rust", ".java": "Java", ".kt": "Kotlin", ".cs": "C#", ".cpp": "C++", ".c": "C",
+            ".rb": "Ruby", ".php": "PHP", ".swift": "Swift", ".ps1": "PowerShell", ".sh": "Shell", ".sql": "SQL",
+            ".tf": "Terraform", ".bicep": "Bicep", ".scala": "Scala", ".dart": "Dart"}
+SENSITIVE = re.compile(r"(auth|login|password|secret|token|crypto|sign|security|permission|acl|payment|billing|"
+                       r"invoice|terraform|bicep|infra|deploy|migration|\.github[\\/]workflows)", re.I)
+SECRET_FILES = re.compile(r"(^|[\\/])(\.env(\..*)?|.*\.pem|.*\.key|.*\.pfx|id_rsa.*|secrets?\.(json|ya?ml)|"
+                          r"credentials.*)$", re.I)
+SECRET_VALUE = re.compile(r"""["']?(?:[a-z_]*token|secret|password|passwd|api[_-]?key|client[_-]?secret|"""
+                          r"""private[_-]?key|access[_-]?key)["']?\s*[:=]\s*["']?[A-Za-z0-9_\-./+=:]{12,}""", re.I)
+
+
+def _has_secret(path: Path) -> bool:
+    """A small config file that holds what looks like a real credential value."""
+    try:
+        return bool(SECRET_VALUE.search(path.read_text(encoding="utf-8", errors="replace")))
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Model tiers
+# ---------------------------------------------------------------------------
+
+def load_tiers() -> dict[str, dict]:
+    tiers = json.loads(json.dumps(DEFAULT_TIERS))
+    if TIERS_OVERRIDE.exists():
+        for name, val in json.loads(TIERS_OVERRIDE.read_text(encoding="utf-8-sig")).items():
+            tiers[name] = {**tiers.get(name, {}), **val}
+    return tiers
+
+
+# ---------------------------------------------------------------------------
+# analyze
+# ---------------------------------------------------------------------------
+
+def analyze(folder: Path) -> dict:
+    folder = folder.resolve()
+    langs: collections.Counter = collections.Counter()
+    big, big_code, sensitive, secrets_found, docs = [], [], [], [], []
+    files = 0
+    for root, dirs, names in os.walk(folder):
+        # Skip dependencies, build output, virtual environments, bundled tools and hidden folders.
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.endswith(".worktrees")
+                   and (not d.startswith(".") or d in (".github", ".vscode"))
+                   and not (Path(root) / d / "pyvenv.cfg").exists() and d != "site-packages"]
+        for n in names:
+            p = Path(root) / n
+            rel = p.relative_to(folder).as_posix()
+            files += 1
+            ext = p.suffix.lower()
+            if ext in LANG_EXT:
+                langs[LANG_EXT[ext]] += 1
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if size > 200_000 and ext in (".txt", ".md", ".json", ".csv", ".log", ".xml", ".html", ".jsonl", ".yaml",
+                                           ".yml", ".sql", ".pdf"):
+                big.append({"path": rel, "kb": size // 1024})
+            elif size > 60_000 and ext in LANG_EXT:
+                big_code.append({"path": rel, "kb": size // 1024})
+            if SECRET_FILES.search(rel) or (size < 50_000 and ext in (".json", ".yaml", ".yml", ".ini", ".toml", ".cfg")
+                                            and _has_secret(p)):
+                secrets_found.append(rel)
+            elif ext in LANG_EXT and SENSITIVE.search(rel):
+                sensitive.append(rel)
+            if ext in (".md",) and rel.count("/") <= 1:
+                docs.append(rel)
+
+    def exists(*parts: str) -> bool:
+        return (folder.joinpath(*parts)).exists()
+
+    tests = []
+    if exists("pyproject.toml") or exists("pytest.ini") or exists("setup.cfg"):
+        tests.append("python -m pytest")
+    if exists("tests") and langs.get("Python"):
+        tests.append("python -m unittest discover -s tests")
+    if exists("package.json"):
+        try:
+            if "test" in (json.loads((folder / "package.json").read_text(encoding="utf-8")).get("scripts") or {}):
+                tests.append("npm test")
+        except (ValueError, OSError):
+            pass
+    if exists("go.mod"):
+        tests.append("go test ./...")
+    if exists("Cargo.toml"):
+        tests.append("cargo test")
+    if list(folder.glob("*.sln")) or list(folder.glob("*.csproj")):
+        tests.append("dotnet test")
+
+    existing = {
+        "AGENTS.md": exists("AGENTS.md"),
+        ".github/copilot-instructions.md": exists(".github", "copilot-instructions.md"),
+        ".github/agents": sorted(p.name for p in (folder / ".github" / "agents").glob("*.agent.md")),
+        ".github/instructions": sorted(p.name for p in (folder / ".github" / "instructions").glob("*.instructions.md")),
+        ".github/skills": sorted(p.name for p in (folder / ".github" / "skills").glob("*") if p.is_dir()),
+        ".github/hooks": sorted(p.name for p in (folder / ".github" / "hooks").glob("*.json")),
+        ".vscode/settings.json": exists(".vscode", "settings.json"),
+        "spend-guard plan": exists(*PLAN_FILE.parts),
+    }
+    always_on = [p.name for p in (folder / ".github" / "instructions").glob("*.instructions.md")
+                 if re.search(r"^applyTo:\s*['\"]?\*\*['\"]?\s*$", p.read_text(encoding="utf-8", errors="replace"), re.M)]
+    return {
+        "folder": str(folder), "name": folder.name, "files": files,
+        "languages": dict(langs.most_common(6)),
+        "test_commands": tests,
+        "big_files": sorted(big, key=lambda b: -b["kb"])[:20],
+        "big_code_files": sorted(big_code, key=lambda b: -b["kb"])[:10],
+        "secret_files": secrets_found[:20],
+        "sensitive_code": sensitive[:30],
+        "docs": sorted(docs)[:10],
+        "existing_customizations": existing,
+        "always_loaded_instructions": always_on,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Plan validation
+# ---------------------------------------------------------------------------
+
+def slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "agent"
+
+
+def validate_plan(plan: dict, tiers: dict) -> dict:
+    if not isinstance(plan, dict):
+        raise ValueError("plan must be a JSON object")
+    p = dict(plan)
+    p.setdefault("project", "Project")
+    p.setdefault("main_name", p["project"])
+    p.setdefault("summary", "")
+    for key in ("routine", "avoid_files", "rules", "specialists"):
+        p.setdefault(key, [])
+        if not isinstance(p[key], list):
+            raise ValueError(f"'{key}' must be a list")
+    p.setdefault("test_command", "")
+    p["guard_tokens"] = int(p.get("guard_tokens") or 100_000)
+    names = {p["main_name"]}
+    out = []
+    for s in p["specialists"]:
+        if not isinstance(s, dict) or not s.get("name") or not s.get("when"):
+            raise ValueError("each specialist needs 'name' and 'when'")
+        s = dict(s)
+        s.setdefault("role", "custom")
+        if s["role"] not in ROLES:
+            raise ValueError(f"role must be one of {ROLES}, got {s['role']!r}")
+        s.setdefault("tier", {"developer": "standard", "reviewer": "accurate", "extractor": "accurate"}.get(s["role"], "standard"))
+        if s["tier"] not in tiers:
+            raise ValueError(f"unknown tier {s['tier']!r} (known: {', '.join(tiers)})")
+        s.setdefault("instructions", "")
+        s["read_only"] = bool(s.get("read_only", s["role"] == "reviewer"))
+        s["double_check"] = bool(s.get("double_check", False)) and s["role"] == "extractor"
+        if s["name"] in names:
+            raise ValueError(f"duplicate agent name {s['name']!r}")
+        names.add(s["name"])
+        out.append(s)
+        if s["double_check"]:
+            checker = {"name": s.get("checker_name") or f"{s['name']} Checker", "role": "checker", "tier": "checker",
+                       "for": s["name"], "when": f"independent second pass after every {s['name']} run",
+                       "instructions": "", "read_only": True, "double_check": False}
+            if checker["name"] in names:
+                raise ValueError(f"duplicate agent name {checker['name']!r}")
+            names.add(checker["name"])
+            out.append(checker)
+    p["specialists"] = out
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+def _models(tier: dict) -> str:
+    return "[" + ", ".join(f"'{m}'" for m in tier["models"]) + "]"
+
+
+def _yaml_str(s: str) -> str:
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _bullets(items: list[str]) -> str:
+    return "\n".join(f"- {i}" for i in items)
+
+
+def _common_constraints(plan: dict) -> list[str]:
+    c = list(plan["rules"])
+    if plan["avoid_files"]:
+        c.append("DO NOT open these large files in full; search them for the exact term and read only the "
+                 "matching lines: " + ", ".join(f"`{f}`" for f in plan["avoid_files"]) + ".")
+    return c
+
+
+def render_main(plan: dict, tiers: dict) -> str:
+    cheap = tiers["cheap"]
+    specs = plan["specialists"]
+    delegable = [s for s in specs if s["role"] != "checker"]
+    agents = "[" + ", ".join(f"'{s['name']}'" for s in specs) + "]"
+    rows = []
+    for s in delegable:
+        action = f"Run the **two-pass check** below (starts with **{s['name']}**)" if s["double_check"] \
+            else f"Delegate to **{s['name']}**"
+        rows.append(f"| {s['when']} | {action} |")
+    routine = ", ".join(plan["routine"]) or "running tools and tests, small edits, docs, git"
+    rows.append(f"| {routine} | Do it yourself |")
+    two_pass = ""
+    for s in delegable:
+        if not s["double_check"]:
+            continue
+        chk = next(c for c in specs if c.get("for") == s["name"])
+        two_pass += f"""
+## Two-pass check for {s['name']} (accuracy matters most)
+1. Delegate the work to **{s['name']}**. It returns each extracted item with an ID and its exact
+   location in the source, plus the items it is unsure of.
+2. Delegate to **{chk['name']}** with ONLY the source path and, per item, its ID, location and what
+   it is (never the first values): the second pass must be independent.
+3. Compare the two passes item by item (normalise units and number formats first).
+   Same value: accept it as agreed. Different, unreadable or low confidence on either side:
+   keep it unconfirmed, record both readings, and ask the user.
+4. Show the user a table: ID | item | first pass | second pass | agreed / needs confirmation.
+   Agreement is not confirmation; confirmation stays with the user.
+"""
+    constraints = _bullets(_common_constraints(plan) + [
+        "Never do a specialist's work yourself, even if it looks easy."])
+    tests = f"\nRun tests with `{plan['test_command']}`.\n" if plan["test_command"] else ""
+    desc = (f"Main {plan['project']} agent for all work in this project. Does routine work itself on a low-cost "
+            f"model and automatically delegates to: " + "; ".join(f"{s['name']} ({s['when']})" for s in delegable) + ".")
+    return f"""---
+name: {_yaml_str(plan['main_name'])}
+description: {_yaml_str(desc)}
+model: {_models(cheap)}
+agents: {agents}
+---
+<!-- {MARK} {VERSION}: edit .github/spend-guard.json and run `spendguard.py update` instead of this file -->
+You are the entry point for {plan['project']}{(': ' + plan['summary']) if plan['summary'] else ''}. You run on a
+low-cost model: do routine work yourself and hand the expensive kinds of work to specialist
+subagents on stronger models. Decide this for every request; the user does not pick agents.
+{tests}
+## Routing (decide before doing anything)
+| The request needs... | Do this |
+|---|---|
+{chr(10).join(rows)}
+{two_pass}
+## Delegating
+- Give the subagent everything in one message: the goal, files and paths, expected result and
+  what to return. It does not see this conversation.
+- Use its result as given; do not redo its work.
+
+## Constraints
+{constraints}
+
+## Output Format
+A short summary: what was delegated (and its result), commands run, results, and anything
+waiting on the user.
+"""
+
+
+def render_specialist(s: dict, plan: dict, tiers: dict) -> str:
+    tier = tiers[s["tier"]]
+    effort = f"\nreasoning-effort: {tier['reasoning_effort']}" if tier.get("reasoning_effort") else ""
+    tools = "\ntools: [read, search, execute]" if s["read_only"] else ""
+    hidden = "\nuser-invocable: false" if s["role"] in ("reviewer", "checker") else ""
+    role = s["role"]
+    extra = s["instructions"].strip()
+    constraints = _common_constraints(plan)
+    if s["read_only"]:
+        constraints.append("Read-only: do not edit, create or delete files.")
+    if role == "developer":
+        intro = f"You write and fix code for {plan['project']}."
+        approach = [
+            "Search for the relevant code; read only the ranges you need.",
+            "Handle every variant of the input the bug or feature involves, not only the example given, "
+            "and add a test built from the real example.",
+            f"Make the change and run the tests{(' (`' + plan['test_command'] + '`)') if plan['test_command'] else ''}.",
+            "If the same problem survives two attempts, or it is a hard design question, stop and report that "
+            "it needs a stronger model, with what you tried."]
+        out = "Files changed and what each change does, test results, and whether the change touches " \
+              "security-sensitive code."
+    elif role == "reviewer":
+        intro = f"You review {plan['project']} changes. Mistakes here matter, so be thorough and concrete."
+        approach = ["Read the diff (`git --no-pager diff`) and only the code around it.",
+                    "For each concern, construct a concrete failure scenario; drop anything you can't make concrete."]
+        out = "Findings ordered by severity, each with file/line, the concrete scenario and a suggested fix; " \
+              "or \"No issues found\"."
+    elif role == "extractor":
+        intro = f"You extract information from source material for {plan['project']}. Accuracy is the top " \
+                "requirement; take the time you need."
+        approach = ["Work from the source at full resolution, one item at a time. Record the literal text exactly "
+                    "as written before its interpretation.",
+                    "Give every item an ID and its exact location in the source (page and region), because an "
+                    "independent second pass is made from those locations." if s["double_check"]
+                    else "Give every item an ID and its exact location in the source.",
+                    "Watch for look-alike characters, decimal separators and units.",
+                    "If you are not sure, say so and explain why. Never guess to fill a gap."]
+        out = "Each item with ID, location, literal text and interpretation, and the list of items you are " \
+              "unsure of."
+    elif role == "checker":
+        intro = (f"You make an independent second pass of work done by {s['for']}. You are deliberately not told "
+                 "its results.")
+        approach = ["For each item you are given (ID, location, what it is), go to that location in the source "
+                    "and read it yourself.",
+                    "Record the literal text, your interpretation and a confidence: high, medium or low.",
+                    "If the location doesn't contain the item, say so."]
+        constraints.append(f"DO NOT read {s['for']}'s results, notes or any earlier output: your pass must be "
+                           "independent. Use only the source and the IDs/locations you were given.")
+        out = "One line per ID: `ID | literal text | interpretation | confidence | note`."
+    else:
+        intro = f"You are a specialist for {plan['project']}."
+        approach = []
+        out = "A concise result the main agent can act on."
+    body_extra = f"\n{extra}\n" if extra else ""
+    approach_md = ("\n## Approach\n" + "\n".join(f"{i}. {a}" for i, a in enumerate(approach, 1)) + "\n") if approach else ""
+    return f"""---
+name: {_yaml_str(s['name'])}
+description: {_yaml_str(f"{s['when']}. Used by the main {plan['main_name']} agent.")}
+model: {_models(tier)}{effort}{tools}{hidden}
+---
+<!-- {MARK} {VERSION}: edit .github/spend-guard.json and run `spendguard.py update` instead of this file -->
+{intro}
+{body_extra}{approach_md}
+## Constraints
+{_bullets(constraints)}
+
+## Output Format
+{out} This is returned to the main {plan['main_name']} agent.
+"""
+
+
+def render_section(plan: dict, tiers: dict) -> str:
+    lines = [SECTION_START, "## Model routing (Spend-Guard)", "",
+             f"New chats here start on a low-cost model (`.vscode/settings.json`). Whichever agent you are, "
+             f"route every request yourself; the user does not pick agents. The full routing table is in "
+             f"`.github/agents/{slug(plan['main_name'])}.agent.md`:"]
+    for s in plan["specialists"]:
+        if s["role"] == "checker":
+            continue
+        tail = " (with an independent second pass by the checker; disagreements go to the user)" \
+            if s["double_check"] else ""
+        lines.append(f"- {s['when']}: delegate to the `{s['name']}` subagent{tail}.")
+    lines.append(f"- {', '.join(plan['routine']) or 'Routine work'}: do it yourself.")
+    if plan["avoid_files"]:
+        lines.append("- Never open " + ", ".join(f"`{f}`" for f in plan["avoid_files"]) + " in full; search them.")
+    lines += ["", "### Long chats",
+              f"`.github/hooks/spend_guard.py` adds a \"[Spend-Guard …]\" note to the message once this chat "
+              f"passes ~{plan['guard_tokens'] // 1000}k tokens of context. Continue follow-ups here; move a new task to "
+              "a fresh chat with a short handoff.", SECTION_END]
+    return "\n".join(lines) + "\n"
+
+
+GUARD_JSON = """{
+  "version": 1,
+  "hooks": {
+    "userPromptTransformed": [
+      {
+        "type": "command",
+        "powershell": "python .github/hooks/spend_guard.py",
+        "bash": "python3 .github/hooks/spend_guard.py",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
+"""
+
+GUARD_PY = '''"""Spend-Guard hook ({mark} {version}): a Copilot userPromptTransformed hook.
+
+Every model call resends the whole chat. When this chat's context passes a threshold, append
+a note asking the agent to move a NEW task to a fresh low-cost chat with a short handoff.
+Follow-ups continue normally. Fails open: on any problem the message is left unchanged.
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+SOFT_TOKENS = int(os.environ.get("SPEND_GUARD_TOKENS", "{tokens}"))
+MODEL = "{model}"
+
+
+def context_tokens(session_id):
+    home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
+    with open(home / "session-state" / session_id / "events.jsonl", "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - 4_000_000))
+        lines = f.read().split(b"\\n")
+    for raw in reversed(lines):
+        if b'"session.usage_record"' in raw[:80]:
+            try:
+                usage = json.loads(raw)["data"]["usage"]
+            except (ValueError, KeyError):
+                continue
+            if usage.get("initiator") != "sub-agent":
+                return int(usage.get("inputTokens") or 0)
+    return 0
+
+
+def main():
+    data = json.loads(sys.stdin.buffer.read().decode("utf-8") or "{{}}")
+    sid = data.get("sessionId") or data.get("session_id") or ""
+    content = data.get("transformedPrompt")
+    if not sid or not isinstance(content, str) or not content.strip():
+        return "{{}}"
+    tokens = context_tokens(sid)
+    if tokens < SOFT_TOKENS:
+        return "{{}}"
+    note = (
+        f"\\n\\n[Spend-Guard: this chat is long (~{{tokens // 1000}}k tokens of history are resent with every "
+        "request). Decide whether the request above is a NEW task or a follow-up. Follow-up: ignore this note. "
+        "New task: do not start it here. If you have the create_session tool, call it with model "
+        f"\\"{{MODEL}}\\", this workspace, a short title, and a prompt containing a handoff (goal, key files, "
+        "decisions and state that matter, max ~15 lines) followed by the user's request verbatim; then reply in "
+        "one line with the link. Otherwise tell the user in one line to start a new chat and give a 3-line "
+        "handoff to paste.]"
+    )
+    return json.dumps({{"modifiedTransformedPrompt": content + note}})
+
+
+if __name__ == "__main__":
+    try:
+        out = main()
+    except Exception:
+        out = "{{}}"
+    sys.stdout.write(out)
+    sys.stdout.flush()
+'''
+
+
+# ---------------------------------------------------------------------------
+# apply / update / remove
+# ---------------------------------------------------------------------------
+
+def _write_managed(path: Path, text: str, log: list[str], dry: bool) -> None:
+    if path.exists():
+        old = path.read_text(encoding="utf-8", errors="replace")
+        if MARK not in old:
+            log.append(f"skipped {path.as_posix()}: exists and wasn't created by Spend-Guard (rename it or remove it)")
+            return
+        if old == text:
+            log.append(f"unchanged {path.as_posix()}")
+            return
+    if not dry:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+    log.append(f"wrote {path.as_posix()}")
+
+
+def _strip_jsonc(text: str) -> str:
+    return re.sub(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*.*?\*/', lambda m: m.group(1) or "", text, flags=re.S)
+
+
+def _settings(folder: Path, model_id: str, log: list[str], dry: bool, remove: bool = False) -> bool:
+    """Set (or unset) chat.defaultModel in .vscode/settings.json. Returns True if Spend-Guard created the file."""
+    path = folder / ".vscode" / "settings.json"
+    key = "chat.defaultModel"
+    if not path.exists():
+        if remove:
+            return False
+        if not dry:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{\n  // " + MARK + ": new chats start on the low-cost model\n"
+                            f'  "{key}": "{model_id}"\n}}\n', encoding="utf-8", newline="\n")
+        log.append(f"wrote {path.as_posix()} ({key} = {model_id})")
+        return True
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    if MARK in text and text.count("\n") <= 4:
+        if remove:
+            if not dry:
+                path.unlink()
+            log.append(f"removed {path.as_posix()}")
+            return False
+        new = re.sub(rf'"{re.escape(key)}"\s*:\s*"[^"]*"', f'"{key}": "{model_id}"', text)
+        if new != text and not dry:
+            path.write_text(new, encoding="utf-8", newline="\n")
+        log.append(f"{'updated' if new != text else 'unchanged'} {path.as_posix()}")
+        return True
+    try:
+        data = json.loads(_strip_jsonc(text) or "{}")
+    except ValueError:
+        data = None
+    if remove:
+        if isinstance(data, dict) and data.get(key) == model_id and _strip_jsonc(text) == text:
+            data.pop(key)
+            if not dry:
+                path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
+            log.append(f"removed {key} from {path.as_posix()}")
+        return False
+    if isinstance(data, dict) and data.get(key) == model_id:
+        log.append(f"unchanged {path.as_posix()}")
+    elif isinstance(data, dict) and key not in data and _strip_jsonc(text) == text:
+        data[key] = model_id
+        if not dry:
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
+        log.append(f"added {key} = {model_id} to {path.as_posix()}")
+    else:
+        log.append(f"left {path.as_posix()} alone (has comments or its own {key}): add \"{key}\": \"{model_id}\" "
+                   "yourself if you want new chats to start on the low-cost model")
+    return False
+
+
+def _section(folder: Path, section: str | None, log: list[str], dry: bool) -> None:
+    path = folder / "AGENTS.md"
+    text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    pattern = re.compile(re.escape(SECTION_START) + r".*?" + re.escape(SECTION_END) + r"\n?", re.S)
+    if section is None:
+        if not pattern.search(text):
+            return
+        new = pattern.sub("", text).rstrip() + "\n"
+        if not dry:
+            if new.strip():
+                path.write_text(new, encoding="utf-8", newline="\n")
+            else:
+                path.unlink()
+        log.append(f"removed the Spend-Guard section from {path.as_posix()}")
+        return
+    if pattern.search(text):
+        new = pattern.sub(lambda _m: section, text)
+    elif text.strip():
+        new = text.rstrip() + "\n\n" + section
+    else:
+        new = f"# {folder.name}: agent guide\n\n" + section
+    if new == text:
+        log.append(f"unchanged {path.as_posix()}")
+        return
+    if not dry:
+        path.write_text(new, encoding="utf-8", newline="\n")
+    log.append(f"wrote the Spend-Guard section in {path.as_posix()}")
+
+
+def apply(folder: Path, plan: dict, dry: bool = False) -> list[str]:
+    folder = folder.resolve()
+    tiers = load_tiers()
+    plan = validate_plan(plan, tiers)
+    log: list[str] = []
+    agents_dir = folder / ".github" / "agents"
+    wanted = {slug(plan["main_name"]) + ".agent.md"}
+    _write_managed(agents_dir / f"{slug(plan['main_name'])}.agent.md", render_main(plan, tiers), log, dry)
+    for s in plan["specialists"]:
+        fname = f"{slug(s['name'])}.agent.md"
+        wanted.add(fname)
+        _write_managed(agents_dir / fname, render_specialist(s, plan, tiers), log, dry)
+    for old in agents_dir.glob("*.agent.md") if agents_dir.exists() else []:
+        if old.name not in wanted and MARK in old.read_text(encoding="utf-8", errors="replace"):
+            if not dry:
+                old.unlink()
+            log.append(f"removed {old.as_posix()} (no longer in the plan)")
+    hooks = folder / ".github" / "hooks"
+    _write_managed(hooks / "spend_guard.py", GUARD_PY.format(
+        mark=MARK, version=VERSION, tokens=plan["guard_tokens"], model=tiers["cheap"]["default_model_id"]), log, dry)
+    guard_json = GUARD_JSON.replace('"version": 1,', f'"version": 1,\n  "description": "{MARK}",')
+    _write_managed(hooks / "spend-guard.json", guard_json, log, dry)
+    _section(folder, render_section(plan, tiers), log, dry)
+    created = _settings(folder, tiers["cheap"]["default_model_id"], log, dry)
+    saved = {**plan, "spend_guard_version": VERSION}
+    saved["specialists"] = [s for s in plan["specialists"] if s["role"] != "checker"]
+    prev = {}
+    if (folder / PLAN_FILE).exists():
+        try:
+            prev = json.loads((folder / PLAN_FILE).read_text(encoding="utf-8-sig"))
+        except ValueError:
+            prev = {}
+    saved["applied"] = prev.get("applied") or dt.datetime.now(dt.timezone.utc).isoformat(timespec="minutes")
+    saved["created_settings"] = created or bool(prev.get("created_settings"))
+    if not dry:
+        (folder / PLAN_FILE).parent.mkdir(parents=True, exist_ok=True)
+        (folder / PLAN_FILE).write_text(json.dumps(saved, indent=2) + "\n", encoding="utf-8", newline="\n")
+    log.append(f"saved the plan to {(folder / PLAN_FILE).as_posix()}")
+    return log
+
+
+def load_plan(folder: Path) -> dict:
+    path = folder.resolve() / PLAN_FILE
+    if not path.exists():
+        raise FileNotFoundError(f"no Spend-Guard plan in {folder} (run apply first)")
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def remove(folder: Path, dry: bool = False) -> list[str]:
+    folder = folder.resolve()
+    log: list[str] = []
+    for d in (folder / ".github" / "agents", folder / ".github" / "hooks"):
+        for p in list(d.glob("*")) if d.exists() else []:
+            if p.is_file() and MARK in p.read_text(encoding="utf-8", errors="replace"):
+                if not dry:
+                    p.unlink()
+                log.append(f"removed {p.as_posix()}")
+    _section(folder, None, log, dry)
+    plan = {}
+    if (folder / PLAN_FILE).exists():
+        plan = json.loads((folder / PLAN_FILE).read_text(encoding="utf-8-sig"))
+    _settings(folder, load_tiers()["cheap"]["default_model_id"], log, dry, remove=True)
+    if (folder / PLAN_FILE).exists():
+        if not dry:
+            (folder / PLAN_FILE).unlink()
+        log.append(f"removed {(folder / PLAN_FILE).as_posix()}")
+    for d in (folder / ".github" / "agents", folder / ".github" / "hooks", folder / ".vscode", folder / ".github"):
+        if d.exists() and not any(d.iterdir()) and not dry:
+            d.rmdir()
+    _ = plan
+    return log
+
+
+# ---------------------------------------------------------------------------
+# report
+# ---------------------------------------------------------------------------
+
+def _usage_records(root: Path):
+    for d in root.iterdir() if root.exists() else []:
+        f = d / "events.jsonl"
+        if not f.exists():
+            continue
+        proj = d.name[:8]
+        ws = d / "workspace.yaml"
+        if ws.exists():
+            for line in ws.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("cwd:"):
+                    cwd = Path(line[4:].strip().strip("'\""))
+                    proj = cwd.parent.name.removesuffix(".worktrees") if cwd.parent.name.endswith(".worktrees") \
+                        else cwd.name
+        with open(f, "rb") as fh:
+            for raw in fh:
+                if b'"session.usage_record"' not in raw[:80]:
+                    continue
+                try:
+                    e = json.loads(raw)
+                    u = e["data"]["usage"]
+                    t = dt.datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
+                except (ValueError, KeyError):
+                    continue
+                yield (t, d.name, proj, u.get("modelDisplayName") or u.get("model") or "?",
+                       ((u.get("copilotUsage") or {}).get("totalNanoAiu") or 0) / 1e9,
+                       int(u.get("inputTokens") or 0), u.get("initiator"))
+
+
+def report(days: int = 7, root: Path | None = None, now: dt.datetime | None = None) -> str:
+    root = root or COPILOT_HOME / "session-state"
+    now = now or dt.datetime.now(dt.timezone.utc)
+    start, prev_start = now - dt.timedelta(days=days), now - dt.timedelta(days=2 * days)
+    cur, prev = collections.defaultdict(float), collections.defaultdict(float)
+    models, calls = collections.defaultdict(float), collections.Counter()
+    peak: dict[tuple, int] = {}
+    for t, sid, proj, model, credits, tokens, initiator in _usage_records(root):
+        if t >= start:
+            cur[proj] += credits
+            models[model] += credits
+            calls[model] += 1
+            if initiator != "sub-agent":
+                peak[(proj, sid)] = max(peak.get((proj, sid), 0), tokens)
+        elif t >= prev_start:
+            prev[proj] += credits
+    tc, tp = sum(cur.values()), sum(prev.values())
+    out = [f"AI usage, last {days} days (estimate from local Copilot logs; 1 credit is about $0.01)",
+           f"  Total: {tc:,.0f} credits (~${tc / 100:,.2f})   previous {days} days: {tp:,.0f} (~${tp / 100:,.2f})"
+           + (f"   change: {100 * (tc - tp) / tp:+.0f}%" if tp else ""), "By project:"]
+    for p in sorted(set(cur) | set(prev), key=lambda k: -cur.get(k, 0)):
+        c, pv = cur.get(p, 0.0), prev.get(p, 0.0)
+        out.append(f"  {p:28} ~${c / 100:8,.2f}   (before: ~${pv / 100:,.2f}"
+                   + (f", {100 * (c - pv) / pv:+.0f}%" if pv else "") + ")")
+    out.append("By model:")
+    for m, v in sorted(models.items(), key=lambda x: -x[1]):
+        out.append(f"  {m:22} ~${v / 100:8,.2f}   {calls[m]} calls, {v / max(calls[m], 1):.2f} credits/call")
+    long_chats = sorted(((k, v) for k, v in peak.items() if v >= 100_000), key=lambda x: -x[1])
+    out.append(f"Chats past 100k tokens of context: {len(long_chats)}")
+    out += [f"  {k[0]} ({k[1][:8]}): peak {v // 1000}k" for k, v in long_chats[:5]]
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="spendguard", description="Keeps coding-agent AI spend down.")
+    ap.add_argument("--version", action="version", version=VERSION)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    a = sub.add_parser("analyze", help="facts about a project (JSON)")
+    a.add_argument("folder", type=Path)
+    a = sub.add_parser("apply", help="generate or refresh the setup from a plan")
+    a.add_argument("folder", type=Path)
+    a.add_argument("--plan", type=Path, required=True)
+    a.add_argument("--dry-run", action="store_true")
+    a = sub.add_parser("update", help="re-render from the saved plan")
+    a.add_argument("folder", type=Path)
+    a.add_argument("--dry-run", action="store_true")
+    a = sub.add_parser("remove", help="remove everything Spend-Guard generated")
+    a.add_argument("folder", type=Path)
+    a.add_argument("--dry-run", action="store_true")
+    a = sub.add_parser("report", help="AI cost per project and model")
+    a.add_argument("--days", type=int, default=7)
+    a = sub.add_parser("tiers", help="show model tiers")
+    a.add_argument("--init", action="store_true", help=f"write an editable copy to {TIERS_OVERRIDE}")
+    args = ap.parse_args(argv)
+    try:
+        if args.cmd == "analyze":
+            print(json.dumps(analyze(args.folder), indent=2))
+        elif args.cmd == "apply":
+            print("\n".join(apply(args.folder, json.loads(args.plan.read_text(encoding="utf-8-sig")), args.dry_run)))
+        elif args.cmd == "update":
+            print("\n".join(apply(args.folder, load_plan(args.folder), args.dry_run)))
+        elif args.cmd == "remove":
+            print("\n".join(remove(args.folder, args.dry_run)) or "nothing to remove")
+        elif args.cmd == "report":
+            print(report(args.days))
+        elif args.cmd == "tiers":
+            if args.init:
+                TIERS_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
+                if not TIERS_OVERRIDE.exists():
+                    TIERS_OVERRIDE.write_text(json.dumps(DEFAULT_TIERS, indent=2) + "\n", encoding="utf-8")
+                print(f"edit {TIERS_OVERRIDE}, then run `spendguard.py update <folder>` in each project")
+            print(json.dumps(load_tiers(), indent=2))
+    except (ValueError, FileNotFoundError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
