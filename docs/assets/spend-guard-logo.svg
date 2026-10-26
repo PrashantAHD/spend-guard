@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Spend-Guard logo</title>
+  <desc id="desc">A blue shield containing dollar, rupee and euro nodes around a safety checkmark.</desc>
+  <defs>
+    <linearGradient id="shield" x1="30" y1="20" x2="220" y2="236" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#0F766E"/>
+    </linearGradient>
+    <linearGradient id="core" x1="92" y1="80" x2="170" y2="178" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FDE68A"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </linearGradient>
+  </defs>
+  <path d="M128 14 226 48v71c0 59-39 99-98 123-59-24-98-64-98-123V48l98-34Z"
+        fill="url(#shield)"/>
+  <path d="M128 32 207 59v59c0 48-30 81-79 103-49-22-79-55-79-103V59l79-27Z"
+        fill="none" stroke="#DBEAFE" stroke-opacity=".72" stroke-width="5"/>
+  <g fill="none" stroke="#E0F2FE" stroke-linecap="round" stroke-width="8">
+    <path d="m128 102-39 31m39-31 39 31m-39-31V72m-39 61 39 30m39-30-39 30"/>
+  </g>
+  <g fill="url(#core)" stroke="#FFF7ED" stroke-width="5">
+    <circle cx="128" cy="102" r="18"/>
+    <circle cx="89" cy="133" r="15"/>
+    <circle cx="167" cy="133" r="15"/>
+    <circle cx="128" cy="163" r="15"/>
+  </g>
+  <g fill="#0F3D56" font-family="Arial, sans-serif" font-size="17" font-weight="700"
+     text-anchor="middle" dominant-baseline="central">
+    <text x="89" y="133">$</text>
+    <text x="167" y="133">₹</text>
+    <text x="128" y="163">€</text>
+  </g>
+  <path d="m119 103 7 7 14-17" fill="none" stroke="#0F3D56" stroke-linecap="round"
+        stroke-linejoin="round" stroke-width="7"/>
+</svg>

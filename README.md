@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/spend-guard-logo.svg" alt="Spend-Guard logo" width="128">
+
 # 🛡️ Spend-Guard
 
 **Stop paying top-model prices for routine AI coding work.**
@@ -76,6 +78,103 @@ committing it because paths and symbol names can still reveal project structure.
 
 Model names change often. Run `spendguard.py tiers --init`, edit `~/.copilot/spend-guard/tiers.json`, then
 `spendguard.py update <project>` to switch every project at once.
+
+## How Spend-Guard works
+
+Spend-Guard is a project-level AI cost-control system. It keeps routine work cheap, escalates only
+when the task needs more reasoning, and carries a small amount of durable context into new chats
+instead of replaying the entire conversation.
+
+```mermaid
+flowchart LR
+    U[Your request] --> M{What kind of work?}
+    M -->|Tests, tools, docs, git| C[💸 Cheap<br/>GPT-5.6 Luna]
+    M -->|Code change or bug fix| S[🛠️ Standard<br/>Sonnet / Sol]
+    M -->|Security or accuracy-critical| A[🛡️ Accurate<br/>Opus]
+    M -->|Independent second pass| K[🔎 Checker<br/>GPT-6 Astra]
+    C --> R[Main agent]
+    S --> R
+    A --> R
+    K --> R
+    R --> V[Verified result]
+```
+
+### The seven cost-saving mechanisms
+
+| # | Mechanism | What happens automatically |
+|---:|---|---|
+| 1 | **Cheap model by default** | New chats use the configured low-cost model, currently GPT-5.6 Luna, through `chat.defaultModel`. |
+| 2 | **Automatic model routing** | The main agent sends routine work to cheap, code changes to standard, and security or accuracy-critical work to accurate tiers. |
+| 3 | **Specialist agents** | Projects receive developer, read-only reviewer, extractor and independent-checker agents only when their codebase needs them. |
+| 4 | **Long-chat guard** | Follow-ups continue in place, but new tasks are directed to a fresh low-cost chat once context becomes expensive. |
+| 5 | **Automatic startup context** | `sessionStart` adds capped notes and a digest of the previous same-workspace chat, with no model call. |
+| 6 | **Secure local code graph** | An optional standard-library graph records local symbols, imports and relationships without network access or model calls. |
+| 7 | **Spend reporting** | Local Copilot logs are compared by project, model, credits, estimated cost and long-chat count. |
+
+### Context without the history bill
+
+```mermaid
+sequenceDiagram
+    participant N as New chat
+    participant H as sessionStart hook
+    participant L as Local session logs
+    participant P as Project notes
+    participant G as Local graph report
+    participant A as Agent
+
+    N->>H: Start workspace session
+    H->>L: Find latest previous chat in same workspace
+    H->>P: Read last ~60 note lines
+    H->>G: Read bounded graph summary if present
+    H-->>N: Add context (maximum ~6,000 characters)
+    N->>A: User request + compact startup context
+```
+
+The startup hook never loads the full previous transcript. It includes the previous session ID,
+up to eight recent user messages, the final assistant response, project notes and an optional
+bounded graph report. Missing or malformed logs fail open.
+
+### Secure local code graph
+
+```mermaid
+flowchart TD
+    F[Local source files] --> X{Strict exclusions}
+    X -->|Secrets, symlinks, dependencies,<br/>build output, files over 200 KB| D[Do not index]
+    X -->|Allowed source code| H[SHA-256 fingerprint]
+    H --> P{Changed?}
+    P -->|No| K[Reuse cached extraction]
+    P -->|Yes| E[Extract symbols and imports locally]
+    K --> O[graph.json + GRAPH_REPORT.md]
+    E --> O
+    O --> S[Bounded startup summary]
+```
+
+The graph stores only relative paths, symbol names, imports, relationships and fingerprints. It
+does not store source text, call a model, access the network, process PDFs or images, run an MCP
+server, or start a watcher.
+
+### Expected savings
+
+Projects using this strategy are expected to reduce AI spend by approximately **60–85%**, depending
+on how much work would otherwise use expensive models. The estimate is workload-dependent, not a
+guarantee:
+
+```mermaid
+pie title Where the savings come from
+    "Cheap routine work" : 35
+    "Targeted specialist hand-offs" : 25
+    "Shorter chats and compact handoffs" : 25
+    "Large-file and graph context control" : 15
+```
+
+The graph itself has no model cost. Its value is reducing repeated context reading. Measure actual
+results with:
+
+```powershell
+python .\skill\spend-guard\spendguard.py report --days 7
+```
+
+That report is based on local Copilot logs; GitHub billing remains authoritative.
 
 ## Quick start
 
