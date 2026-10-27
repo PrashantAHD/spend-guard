@@ -110,6 +110,9 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
   calls. It is on-demand rather than automatically injected, so it does not add tokens to ordinary requests.
 - **dispatch** (`spendguard.py dispatch <folder> <task>`): return a deterministic, route-only decision
   between Copilot and an approved provider based on task kind. It never invokes a provider.
+- **validate** (`spendguard.py validate <folder> [--strict]`): audit the generated setup, hooks, notes,
+  provider policy, syntax and reviewer coverage without running project code or making model/network
+  calls. Strict mode turns warnings into failures.
 
 ## Plan schema
 

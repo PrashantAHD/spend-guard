@@ -14,6 +14,7 @@ Commands:
     python spendguard.py memory search <folder> <query> [--all-workspaces]
                                                             search approved local session messages
     python spendguard.py dispatch <folder> <task>           choose a trusted route without making a model call
+    python spendguard.py validate <folder> [--strict]      audit the local Spend-Guard setup
 """
 
 from __future__ import annotations
@@ -871,6 +872,93 @@ def dispatch_task(folder: Path, task: str, free_quota_confirmed: bool = False) -
                        "the approved provider"}
 
 
+def validate_project(folder: Path, strict: bool = False) -> dict:
+    """Audit generated setup files and policy without executing project code."""
+    folder = folder.resolve()
+    errors: list[str] = []
+    warnings: list[str] = []
+    checks: list[str] = []
+
+    def require(path: Path, label: str) -> str:
+        if not path.exists():
+            errors.append(f"missing {label}: {path.relative_to(folder).as_posix()}")
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if MARK not in text and path.name != "notes.md":
+            errors.append(f"{label} is not marked as managed by Spend-Guard: {path.relative_to(folder).as_posix()}")
+        return text
+
+    try:
+        plan = validate_plan(load_plan(folder), load_tiers())
+        checks.append("saved plan is valid")
+    except (ValueError, FileNotFoundError) as exc:
+        errors.append(str(exc))
+        return {"ok": False, "strict": strict, "errors": errors, "warnings": warnings, "checks": checks,
+                "model_calls": 0}
+
+    main_path = folder / ".github" / "agents" / f"{slug(plan['main_name'])}.agent.md"
+    require(main_path, "main agent")
+    for specialist in plan["specialists"]:
+        require(folder / ".github" / "agents" / f"{slug(specialist['name'])}.agent.md",
+                f"specialist {specialist['name']}")
+    hook_json_text = require(folder / ".github" / "hooks" / "spend-guard.json", "hook registration")
+    hook_text = require(folder / ".github" / "hooks" / "spend_guard.py", "cost guard hook")
+    session_text = require(folder / ".github" / "hooks" / "session_start.py", "session-start hook")
+    notes_path = folder / NOTES_FILE
+    if not notes_path.exists():
+        errors.append(f"missing project notes: {NOTES_FILE.as_posix()}")
+    else:
+        checks.append("project notes exist")
+    provider_path = folder / PROVIDER_POLICY_FILE
+    provider_text = require(provider_path, "provider policy")
+    try:
+        hook = json.loads(hook_json_text)
+        if not {"sessionStart", "userPromptTransformed"}.issubset(hook.get("hooks", {})):
+            errors.append("hook registration must include sessionStart and userPromptTransformed")
+        else:
+            checks.append("hook registration is valid")
+    except ValueError:
+        errors.append("hook registration is not valid JSON")
+    try:
+        provider = json.loads(provider_text)
+        if provider.get("allowed") != plan["provider_policy"]["allowed"]:
+            errors.append("generated provider allowlist differs from the saved plan")
+        dispatcher = provider.get("dispatcher", {})
+        if dispatcher.get("external_cost_mode") != "free_only" or \
+                dispatcher.get("require_free_quota_confirmation") is not True:
+            errors.append("provider policy does not enforce free-only external routing")
+        else:
+            checks.append("provider policy is trusted and free-only")
+    except ValueError:
+        errors.append("provider policy is not valid JSON")
+    for label, text in (("cost guard hook", hook_text), ("session-start hook", session_text)):
+        if text:
+            try:
+                compile(text, label, "exec")
+            except SyntaxError as exc:
+                errors.append(f"{label} has a syntax error: line {exc.lineno}")
+            else:
+                checks.append(f"{label} compiles")
+    if not plan["test_command"]:
+        warnings.append("no test command is configured")
+    sensitive_paths = []
+    for root, dirs, names in os.walk(folder):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
+        for name in names:
+            rel = (Path(root) / name).relative_to(folder).as_posix()
+            if SENSITIVE.search(rel):
+                sensitive_paths.append(rel)
+    if sensitive_paths and not any(s["role"] == "reviewer" for s in plan["specialists"]):
+        warnings.append("sensitive-looking paths exist without a generated reviewer: " +
+                        ", ".join(sensitive_paths[:5]))
+    else:
+        checks.append("specialist coverage is configured for detected sensitive paths")
+    if strict and warnings:
+        errors.extend(f"strict: {warning}" for warning in warnings)
+    return {"ok": not errors, "strict": strict, "errors": errors, "warnings": warnings,
+            "checks": checks, "model_calls": 0}
+
+
 def _strip_jsonc(text: str) -> str:
     return re.sub(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*.*?\*/', lambda m: m.group(1) or "", text, flags=re.S)
 
@@ -1443,6 +1531,9 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("task")
     d.add_argument("--free-quota-confirmed", action="store_true",
                    help="allow an external route only when its free quota is confirmed")
+    v = sub.add_parser("validate", help="audit the local Spend-Guard setup without running project code")
+    v.add_argument("folder", type=Path)
+    v.add_argument("--strict", action="store_true", help="treat warnings as validation errors")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "analyze":
@@ -1468,6 +1559,10 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(memory_search(args.folder, args.query, all_workspaces=args.all_workspaces), indent=2))
         elif args.cmd == "dispatch":
             print(json.dumps(dispatch_task(args.folder, args.task, args.free_quota_confirmed), indent=2))
+        elif args.cmd == "validate":
+            result = validate_project(args.folder, args.strict)
+            print(json.dumps(result, indent=2))
+            return 0 if result["ok"] else 1
     except (ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

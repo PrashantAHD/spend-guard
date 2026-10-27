@@ -148,6 +148,17 @@ class ApplyTests(Base):
         self.assertEqual(security_external["cost_mode"], "free_only")
         self.assertEqual(security_external["model_calls"], 0)
 
+    def test_validate_audits_generated_setup_without_running_project_code(self):
+        S.apply(self.dir, PLAN)
+        result = S.validate_project(self.dir)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["model_calls"], 0)
+        self.assertIn("provider policy is trusted and free-only", result["checks"])
+        (self.dir / ".github" / "spend-guard-providers.json").unlink()
+        result = S.validate_project(self.dir)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("provider policy" in error for error in result["errors"]))
+
     def test_notes_are_seeded_once_and_preserved(self):
         S.apply(self.dir, PLAN)
         notes = self.dir / ".github" / "notes.md"

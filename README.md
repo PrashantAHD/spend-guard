@@ -134,6 +134,21 @@ provider policy, project notes, low-cost VS Code settings and optional Claude Co
 The local report helps identify cost by project and model, recent versus previous usage, long chats,
 models consuming the most usage and opportunities to move work to cheaper tiers.
 
+### Local setup validator
+
+Audit an applied project without running its code or making model/network calls:
+
+```powershell
+python .\skill\spend-guard\spendguard.py validate C:\path\to\project
+python .\skill\spend-guard\spendguard.py validate C:\path\to\project --strict
+```
+
+The validator checks the saved plan, managed agents, hook registration and Python syntax, project
+notes, provider allowlists, free-only routing, and reviewer coverage for sensitive-looking paths.
+`--strict` treats warnings such as a missing test command as failures. It does not prove that an agent
+followed every instruction or that a model response is correct; tests, reviews and human approval remain
+the final quality gates.
+
 ### Important limitations
 
 Spend-Guard does not:
@@ -466,6 +481,7 @@ The skill runs these for you; you can also run them yourself:
 | `python spendguard.py graph <folder>` | Build a local deterministic code graph and bounded `GRAPH_REPORT.md` |
 | `python spendguard.py memory search <folder> <query> [--all-workspaces]` | Search matching messages in local chats |
 | `python spendguard.py dispatch <folder> <task> [--free-quota-confirmed]` | Return a free-only Copilot/external route without calling a model |
+| `python spendguard.py validate <folder> [--strict]` | Audit generated setup and policy without running project code |
 
 `memory search` is on-demand only: it reads local Copilot session logs, excludes subagent and automation
 sessions, ignores messages mentioning `config.json` or `.env`, redacts credential-like values, and caps its
