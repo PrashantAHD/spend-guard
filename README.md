@@ -50,17 +50,9 @@ long-running chat cost more than half the total.
 
 You don't pick agents or models: open a chat and ask. The routing happens on its own.
 
-## Cost-saving strategy in use
+## Cost-saving strategy
 
-We use this strategy in two production workspaces as well as in Spend-Guard itself:
-
-| Project | How the strategy is applied |
-|---|---|
-| [AUTO-C / PipeTrace](https://github.com/PrashantAHD/pipetrace) | Luna is the cheap default for routine piping-tool work, documentation, validation and git. Code changes go to a standard developer. Sketches and drawings use an Opus reader plus an independent GPT-6 Astra checker; disagreements are sent to the contractor. The cost guard keeps new cases out of long chats, while startup context restores the notes and previous-chat digest automatically. |
-| [Agent Doorbell](https://github.com/PrashantAHD/Agent-Doorbell) | Luna is the cheap default for tests, reinstall, health checks, logs, documentation and git. Code changes go to a standard developer, while authentication, signing, Telegram approvals/buttons, session grants and hook or extension changes receive an Opus security review. The cost guard and automatic startup context keep handoffs short and inexpensive. |
-
-These two projects are hand-maintained integrations rather than Spend-Guard-managed
-installations. Both use the same principles: spend the cheap model on predictable work,
+Spend-Guard uses a simple policy: use the cheapest suitable model for predictable work,
 reserve stronger models for code, security and accuracy-critical decisions, and carry only
 a capped local handoff into a new chat instead of the full conversation history.
 
