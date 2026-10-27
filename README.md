@@ -50,6 +50,104 @@ long-running chat cost more than half the total.
 
 You don't pick agents or models: open a chat and ask. The routing happens on its own.
 
+## Benefits of integrating Spend-Guard into a tool
+
+### Lower AI usage costs
+
+- Uses a cheap model for routine work.
+- Escalates only coding, security, architecture or accuracy-critical tasks.
+- Avoids sending every task to the most expensive model.
+- Can use approved external providers only while their free quota is confirmed.
+- Blocks paid external fallback by default.
+
+### Better model selection
+
+Different work can use different model tiers:
+
+- **Cheap:** tests, documentation, searches, logs and git.
+- **Standard:** coding and bug fixes.
+- **Accurate:** security reviews, architecture and sensitive decisions.
+- **Checker:** independent second review when accuracy matters.
+
+### Preserves output quality
+
+- Stronger models are reserved for difficult tasks.
+- Security-sensitive work can be restricted to trusted providers.
+- Accuracy-critical work can use independent checking.
+- Tests, validation and review gates remain part of the workflow.
+- Routine work does not waste expensive model capacity.
+
+### Prevents oversized chats
+
+- The cost guard detects long conversations.
+- It recommends moving new work to a fresh chat.
+- It creates a short handoff instead of carrying the entire transcript.
+- This reduces repeated context-token costs.
+
+### Automatic context continuity
+
+New chats can automatically receive project notes, a bounded previous-chat digest, recent decisions
+and task state, plus optional local code-graph context. This avoids manually copying large
+conversation histories.
+
+### Cross-session memory without model cost
+
+On-demand local memory search can find decisions in the current workspace, explicitly selected other
+workspaces and existing local session logs. It uses no embeddings, model summarization or network
+service.
+
+### Free-only external-provider routing
+
+The route-only dispatcher can prefer Copilot models, route compatible work to approved external
+providers, require explicit free-quota confirmation, restrict sensitive tasks to approved providers,
+fall back to Copilot when quota is unknown or exhausted, and prevent paid external fallback.
+
+### Provider flexibility
+
+A project can define approved providers such as Claude, GPT, Gemini, Grok and NVIDIA for compatible
+external tools. Existing Copilot model routing continues independently.
+
+### Security protections
+
+- Credentials are never stored in generated project files.
+- Secret-looking files are excluded from graph indexing.
+- `.env`, config and credential-like values are protected during memory search.
+- Subagent and automation sessions can be excluded.
+- Sensitive work can stay on Copilot or use restricted trusted providers.
+- Generated files do not overwrite user-owned customization files.
+
+### Local-first operation
+
+- Standard-library Python implementation.
+- No required hosted memory service, background worker or mandatory MCP server.
+- Notes, graphing, memory search and dispatch decisions make no network calls.
+- These features make no additional model calls.
+
+### Easier project onboarding
+
+Spend-Guard can generate a main routing agent, developer specialist, security reviewer when needed,
+accuracy reader and independent checker when needed, automatic session-start and long-chat hooks,
+provider policy, project notes, low-cost VS Code settings and optional Claude Code skills.
+
+### Usage visibility
+
+The local report helps identify cost by project and model, recent versus previous usage, long chats,
+models consuming the most usage and opportunities to move work to cheaper tiers.
+
+### Important limitations
+
+Spend-Guard does not:
+
+- Reduce the fixed Copilot subscription price.
+- Automatically redirect Copilot traffic to an external provider.
+- Guarantee identical output across models.
+- Verify external free quotas unless an integrating client provides that information.
+- Make external API calls by itself.
+- Replace tests, security review or human approval.
+
+The main benefit is **controlled model selection**: use the least expensive safe option for each task
+while reserving stronger models and external providers for cases where they provide real value.
+
 ## Cost-saving strategy
 
 Spend-Guard uses a simple policy: use the cheapest suitable model for predictable work,
