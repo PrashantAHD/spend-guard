@@ -158,9 +158,22 @@ server, or start a watcher.
 
 ### Expected savings
 
-Projects using this strategy are expected to reduce AI spend by approximately **60–85%**, depending
-on how much work would otherwise use expensive models. The estimate is workload-dependent, not a
-guarantee:
+Projects using this strategy are expected to reduce **variable AI usage cost** by approximately
+**60–85%** from Spend-Guard alone. With compatible free external-provider routing integrated and
+available for about 25% of the remaining eligible work, the combined variable-cost reduction is
+approximately **70–89%**. These are workload-dependent estimates, not guarantees:
+
+```text
+Original usage cost:                 100
+Spend-Guard reduction:               60–85%
+Remaining cost:                     15–40
+Free external routing removes 25%:  11.25–30
+Combined reduction:                 70–89%
+```
+
+The free-provider estimate applies only while a provider's free quota is available and the task is
+eligible for external routing. It does not reduce the fixed Copilot Pro subscription price; it reduces
+variable usage or separate API costs. Measure actual results with the local report and provider billing:
 
 ```mermaid
 pie title Where the savings come from
