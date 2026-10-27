@@ -310,6 +310,16 @@ class GuardTests(Base):
                              input=b"not json", capture_output=True, env=env, timeout=20)
         self.assertEqual(bad.stdout, b"{}")
 
+    def test_guard_never_copies_the_prompt_into_notes(self):
+        S.apply(self.dir, PLAN)
+        notes = self.dir / ".github" / "notes.md"
+        before = notes.read_text(encoding="utf-8")
+        home = Path(self.tmp.name) / "home"
+        out = json.loads(self.run_guard({"transformedPrompt": "secret-ish raw prompt", "cwd": str(self.dir)},
+                                        250_000, home))
+        self.assertIn("never the user's message verbatim", out["modifiedTransformedPrompt"])
+        self.assertEqual(notes.read_text(encoding="utf-8"), before)
+
     def run_session_start(self, payload, home):
         out = subprocess.run([sys.executable, str(self.dir / ".github" / "hooks" / "session_start.py")],
                              input=json.dumps(payload).encode(), capture_output=True,

@@ -579,7 +579,6 @@ Follow-ups continue normally. Fails open: on any problem the message is left unc
 
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -604,23 +603,6 @@ def context_tokens(session_id):
     return 0
 
 
-def append_handoff(data, tokens):
-    cwd = data.get("cwd") or data.get("workspace") or data.get("workspaceFolder")
-    if isinstance(cwd, dict):
-        cwd = cwd.get("cwd") or cwd.get("path")
-    if not cwd:
-        return
-    path = Path(str(cwd)) / ".github" / "notes.md"
-    prompt = data.get("transformedPrompt")
-    if not isinstance(prompt, str) or not prompt.strip() or not path.exists():
-        return
-    line = " ".join(prompt.strip().split())[:500]
-    if re.search(r"(^|[\\\\/])(?:config\\.json|\\.env(?:\\b|[.]))", line, re.I):
-        return
-    with path.open("a", encoding="utf-8", newline="\\n") as f:
-        f.write(f"\\n- Cost-guard handoff (~{{tokens // 1000}}k): {{line}}\\n")
-
-
 def main():
     data = json.loads(sys.stdin.buffer.read().decode("utf-8") or "{{}}")
     sid = data.get("sessionId") or data.get("session_id") or ""
@@ -630,14 +612,14 @@ def main():
     tokens = context_tokens(sid)
     if tokens < SOFT_TOKENS:
         return "{{}}"
-    append_handoff(data, tokens)
     note = (
         f"\\n\\n[Spend-Guard: this chat is long (~{{tokens // 1000}}k tokens of history are resent with every "
         "request). Decide whether the request above is a NEW task or a follow-up. Follow-up: ignore this note. "
         "New task: do not start it here. If you have the create_session tool, call it with model "
         f"\\"{{MODEL}}\\", this workspace, a short title, and a prompt containing a handoff (goal, key files, "
-        "decisions and state that matter, max ~15 lines). Also append the handoff to `.github/notes.md` before "
-        "moving when the task has a durable decision or half-done state. Never put secrets or client data there. "
+        "decisions and state that matter, max ~15 lines). Before moving, append a one-line summary of the "
+        "decision, current state or half-done work to `.github/notes.md` (your own words, never the user's "
+        "message verbatim, never secrets or client data). "
         "Then call create_session with the user's request verbatim; reply in "
         "one line with the link. Otherwise tell the user in one line to start a new chat and give a 3-line "
         "handoff to paste.]"
