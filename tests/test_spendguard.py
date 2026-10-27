@@ -116,6 +116,9 @@ class ApplyTests(Base):
         self.assertIn("`.github/notes.md`", agents_md)
         self.assertIn("`.github/notes.md`", main)
         self.assertTrue((self.dir / ".github" / "notes.md").exists())
+        provider_policy = json.loads(self.read(".github/spend-guard-providers.json"))
+        self.assertEqual(provider_policy["allowed"], list(S.TRUSTED_PROVIDERS))
+        self.assertIn("one primary provider", main)
         self.assertIn('"chat.defaultModel": "gpt-5.6-luna"', self.read(".vscode/settings.json"))
         hook = json.loads(self.read(".github/hooks/spend-guard.json"))
         self.assertIn("userPromptTransformed", hook["hooks"])
@@ -123,6 +126,27 @@ class ApplyTests(Base):
         self.assertTrue((self.dir / ".github" / "hooks" / "session_start.py").exists())
         saved = json.loads(self.read(".github/spend-guard.json"))
         self.assertEqual(len(saved["specialists"]), 3)            # the checker is derived, not saved
+
+    def test_dispatcher_routes_compatible_tasks_and_restricts_sensitive_providers(self):
+        S.apply(self.dir, PLAN)
+        routine = S.dispatch_task(self.dir, "update the README")
+        self.assertEqual((routine["target"], routine["model"], routine["tier"]),
+                         ("copilot", "GPT-5.6 Luna (copilot)", "cheap"))
+        self.assertIn("free quota", routine["external_blocked"])
+        routine_external = S.dispatch_task(self.dir, "update the README", free_quota_confirmed=True)
+        self.assertEqual((routine_external["target"], routine_external["provider"], routine_external["tier"]),
+                         ("external", "google", "cheap"))
+        security = S.dispatch_task(self.dir, "review authentication and token signing")
+        self.assertEqual((security["target"], security["model"], security["tier"]),
+                         ("copilot", "Claude Opus 5.5 (copilot)", "accurate"))
+        security_external = S.dispatch_task(self.dir, "review authentication and token signing",
+                                             free_quota_confirmed=True)
+        self.assertEqual((security_external["target"], security_external["provider"], security_external["tier"]),
+                         ("external", "anthropic", "accurate"))
+        self.assertEqual(security_external["allowed_providers"], ["anthropic", "openai"])
+        self.assertEqual(security_external["fallback"]["target"], "copilot")
+        self.assertEqual(security_external["cost_mode"], "free_only")
+        self.assertEqual(security_external["model_calls"], 0)
 
     def test_notes_are_seeded_once_and_preserved(self):
         S.apply(self.dir, PLAN)
@@ -222,6 +246,7 @@ class ApplyTests(Base):
         self.assertFalse((self.dir / ".github" / "hooks").exists())
         self.assertFalse((self.dir / ".vscode").exists())
         self.assertFalse((self.dir / ".github" / "spend-guard.json").exists())
+        self.assertFalse((self.dir / ".github" / "spend-guard-providers.json").exists())
 
     def test_dry_run_writes_nothing(self):
         S.apply(self.dir, PLAN, dry=True)
@@ -233,6 +258,10 @@ class ApplyTests(Base):
                     {"specialists": [{"name": "X", "when": "w", "role": "wizard"}]},
                     {"specialists": [{"name": "X", "when": "w", "tier": "gold"}]},
                     {"providers": ["copilot", "unknown"]},
+                    {"provider_policy": {"allowed": ["unknown"]}},
+                    {"provider_policy": {"routing": {"cheap": ["unknown"]}}},
+                    {"provider_policy": {"dispatcher": {"external_mode": "always"}}},
+                    {"provider_policy": {"dispatcher": {"external_cost_mode": "paid"}}},
                     {"main_name": "X", "specialists": [{"name": "X", "when": "w"}]}):
             with self.assertRaises(ValueError):
                 S.apply(self.dir, bad, dry=True)

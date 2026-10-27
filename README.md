@@ -43,6 +43,8 @@ long-running chat cost more than half the total.
 | 📝 | **Project handoff notes** | Each project gets a small `.github/notes.md` file for durable decisions and half-done work, so new chats read context without carrying full history |
 | 🚀 | **Automatic startup context** | A fast `sessionStart` hook adds capped notes and the previous same-workspace chat's recent user messages and final answer, with no model call |
 | 🕸️ | **Local code graph** | An optional standard-library graph extracts code files, symbols and imports locally, caches unchanged files by SHA-256, and adds a small report to startup context |
+| 🎯 | **Trusted provider policy** | Optional routing guidance for Claude, GPT, Grok, NVIDIA and Gemini, with one primary provider and failure-only fallback |
+| 🚦 | **Route-only dispatcher** | Deterministically chooses Copilot or an approved external provider by task risk, always retaining a Copilot fallback |
 | 📵 | **No whole big files** | Large reference files and huge source files are searched, never read whole |
 | 📊 | **Spend report** | Cost per project and model from your local Copilot logs, compared with the previous period |
 
@@ -73,9 +75,9 @@ committing it because paths and symbol names can still reveal project structure.
 | Tier | Default models | Used for |
 |---|---|---|
 | cheap | GPT-5.6 Luna, GPT-5.4 nano | running tools and tests, small edits, docs, git |
-| standard | Claude Sonnet 5.5, GPT-5.6 Sol | writing and fixing code |
+| standard | Claude Sonnet 5.5, GPT-5.6 Sol, Grok 4.7 | writing and fixing code |
 | accurate | Claude Opus 5.5 | security reviews, accuracy-critical reading |
-| checker | GPT-6 Astra, GPT-5.6 Sol | independent second pass |
+| checker | GPT-6 Astra, Grok 4.7, GPT-5.6 Sol | independent second pass |
 
 Model names change often. Run `spendguard.py tiers --init`, edit `~/.copilot/spend-guard/tiers.json`, then
 `spendguard.py update <project>` to switch every project at once.
@@ -176,6 +178,27 @@ python .\skill\spend-guard\spendguard.py report --days 7
 ```
 
 That report is based on local Copilot logs; GitHub billing remains authoritative.
+
+### Trusted provider routing
+
+Spend-Guard generates `.github/spend-guard-providers.json` for compatible external API tools. The
+default allowlist contains only Anthropic (Claude), OpenAI (GPT), xAI (Grok), NVIDIA and Google (Gemini).
+The policy uses one primary provider per task and permits fallback only for an unavailable provider, timeout
+or failed validation. It does not reroute GitHub Copilot's own endpoint or billing, and it stores no
+credentials. Keep sensitive tasks on the `sensitive_allowed` list and review provider terms before use.
+
+The route-only dispatcher can be queried with:
+
+```powershell
+python .\skill\spend-guard\spendguard.py dispatch C:\path\to\project "review authentication and token signing"
+```
+
+It classifies the request locally, returns a JSON route, and makes zero model or network calls. Copilot is
+the default route, including Copilot models such as Grok 4.7. An external route requires the explicit
+`--free-quota-confirmed` flag and is marked `free_only`; otherwise it falls back to Copilot. Sensitive
+external routes are limited to Anthropic/OpenAI and retain a Copilot fallback. The dispatcher never
+verifies quota, invokes an API or reads credentials; the calling client must confirm the provider's free
+quota and execute the returned route. Paid external fallback is blocked.
 
 ## Quick start
 
@@ -339,6 +362,7 @@ The skill runs these for you; you can also run them yourself:
 | `python spendguard.py tiers [--init]` | Show or customise the model tiers |
 | `python spendguard.py graph <folder>` | Build a local deterministic code graph and bounded `GRAPH_REPORT.md` |
 | `python spendguard.py memory search <folder> <query> [--all-workspaces]` | Search matching messages in local chats |
+| `python spendguard.py dispatch <folder> <task> [--free-quota-confirmed]` | Return a free-only Copilot/external route without calling a model |
 
 `memory search` is on-demand only: it reads local Copilot session logs, excludes subagent and automation
 sessions, ignores messages mentioning `config.json` or `.env`, redacts credential-like values, and caps its

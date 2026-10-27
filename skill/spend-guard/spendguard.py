@@ -13,6 +13,7 @@ Commands:
     python spendguard.py tiers [--init]                   show model tiers (--init writes an editable copy)
     python spendguard.py memory search <folder> <query> [--all-workspaces]
                                                             search approved local session messages
+    python spendguard.py dispatch <folder> <task>           choose a trusted route without making a model call
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ SECTION_END = "<!-- spend-guard:end -->"
 CLAUDE_SECTION_START = "<!-- spend-guard:claude:start -->"
 CLAUDE_SECTION_END = "<!-- spend-guard:claude:end -->"
 PLAN_FILE = Path(".github") / "spend-guard.json"
+PROVIDER_POLICY_FILE = Path(".github") / "spend-guard-providers.json"
 NOTES_FILE = Path(".github") / "notes.md"
 GRAPH_DIR = Path(".github") / "spend-guard-graph"
 GRAPH_FILE = GRAPH_DIR / "graph.json"
@@ -48,15 +50,34 @@ TIERS_OVERRIDE = COPILOT_HOME / "spend-guard" / "tiers.json"
 DEFAULT_TIERS: dict[str, dict] = {
     "cheap": {"models": ["GPT-5.6 Luna (copilot)", "GPT-5.4 nano (copilot)"], "default_model_id": "gpt-5.6-luna",
               "use": "routine work: running tools and tests, small edits, docs, git"},
-    "standard": {"models": ["Claude Sonnet 5.5 (copilot)", "GPT-5.6 Sol (copilot)"],
+    "standard": {"models": ["Claude Sonnet 5.5 (copilot)", "GPT-5.6 Sol (copilot)", "Grok 4.7 (copilot)"],
                  "use": "writing and fixing code"},
     "accurate": {"models": ["Claude Opus 5.5 (copilot)"], "reasoning_effort": "high",
                  "use": "accuracy- or security-critical work"},
-    "checker": {"models": ["GPT-6 Astra (copilot)", "GPT-5.6 Sol (copilot)"], "reasoning_effort": "high",
+    "checker": {"models": ["GPT-6 Astra (copilot)", "Grok 4.7 (copilot)", "GPT-5.6 Sol (copilot)"],
+                "reasoning_effort": "high",
                 "use": "independent second pass from a different model family"},
 }
 
 ROLES = ("developer", "reviewer", "extractor", "custom")
+TRUSTED_PROVIDERS = ("anthropic", "openai", "xai", "nvidia", "google")
+DEFAULT_PROVIDER_POLICY = {
+    "allowed": list(TRUSTED_PROVIDERS),
+    "routing": {
+        "cheap": ["google", "openai", "nvidia"],
+        "standard": ["anthropic", "openai", "google"],
+        "accurate": ["anthropic", "openai"],
+        "checker": ["google", "xai"],
+    },
+    "fallback_on": ["unavailable", "timeout", "validation_failure"],
+    "sensitive_allowed": ["anthropic", "openai"],
+    "dispatcher": {
+        "external_mode": "compatible_tasks",
+        "sensitive_external": "trusted_external",
+        "external_cost_mode": "free_only",
+        "require_free_quota_confirmation": True,
+    },
+}
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "env", "__pycache__", "dist", "build", "target", "bin", "obj",
              ".next", ".tox", ".mypy_cache", ".pytest_cache", "vendor", "coverage", ".idea"}
 LANG_EXT = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript", ".jsx": "JavaScript",
@@ -207,6 +228,39 @@ def validate_plan(plan: dict, tiers: dict) -> dict:
             provider not in ("copilot", "claude") for provider in p["providers"]):
         raise ValueError("'providers' must be a non-empty list containing only 'copilot' or 'claude'")
     p["providers"] = list(dict.fromkeys(p["providers"]))
+    policy = p.get("provider_policy") or {}
+    if not isinstance(policy, dict):
+        raise ValueError("'provider_policy' must be an object")
+    merged = json.loads(json.dumps(DEFAULT_PROVIDER_POLICY))
+    merged.update({key: value for key, value in policy.items() if key != "routing"})
+    routing = dict(merged["routing"])
+    if policy.get("routing") is not None and not isinstance(policy.get("routing"), dict):
+        raise ValueError("'provider_policy.routing' must be an object")
+    if isinstance(policy.get("routing"), dict):
+        routing.update(policy["routing"])
+    merged["routing"] = routing
+    allowed = merged["allowed"]
+    if not isinstance(allowed, list) or not allowed or any(provider not in TRUSTED_PROVIDERS for provider in allowed):
+        raise ValueError(f"'provider_policy.allowed' must contain only trusted providers: {', '.join(TRUSTED_PROVIDERS)}")
+    merged["allowed"] = list(dict.fromkeys(allowed))
+    for tier, providers in merged["routing"].items():
+        if tier not in ("cheap", "standard", "accurate", "checker") or not isinstance(providers, list) or \
+                not providers or any(provider not in merged["allowed"] for provider in providers):
+            raise ValueError(f"provider routing for {tier!r} must be a non-empty list from 'allowed'")
+        merged["routing"][tier] = list(dict.fromkeys(providers))
+    for key in ("fallback_on", "sensitive_allowed"):
+        if not isinstance(merged[key], list) or (key == "sensitive_allowed" and
+                                                   any(provider not in merged["allowed"] for provider in merged[key])):
+            raise ValueError(f"'provider_policy.{key}' is invalid")
+    dispatcher = merged["dispatcher"]
+    if not isinstance(dispatcher, dict) or dispatcher.get("external_mode") not in ("explicit_only", "compatible_tasks"):
+        raise ValueError("'provider_policy.dispatcher.external_mode' must be 'explicit_only' or 'compatible_tasks'")
+    if dispatcher.get("sensitive_external") not in ("copilot_only", "trusted_external"):
+        raise ValueError("'provider_policy.dispatcher.sensitive_external' is invalid")
+    if dispatcher.get("external_cost_mode") != "free_only" or \
+            dispatcher.get("require_free_quota_confirmation") is not True:
+        raise ValueError("external routing must be free-only and require free-quota confirmation")
+    p["provider_policy"] = merged
     p["guard_tokens"] = int(p.get("guard_tokens") or 100_000)
     names = {p["main_name"]}
     out = []
@@ -319,6 +373,13 @@ the task finishes, append 1-3 lines with the decision, current state, half-done 
 - Give the subagent everything in one message: the goal, files and paths, expected result and
   what to return. It does not see this conversation.
 - Use its result as given; do not redo its work.
+
+## Trusted provider policy
+- For compatible external API tools only, use providers from `.github/spend-guard-providers.json`.
+- Use one primary provider per task. Fall back only for an unavailable provider, timeout or failed validation;
+  never ask every provider to answer the same request.
+- Keep authentication, payments, secrets and security reviews on the `sensitive_allowed` list.
+- This policy does not reroute GitHub Copilot's own endpoint or billing.
 
 ## Constraints
 {constraints}
@@ -467,6 +528,8 @@ def render_section(plan: dict, tiers: dict) -> str:
              f"`.github/agents/{slug(plan['main_name'])}.agent.md`:"]
     lines.append("- At the start of a new task, read `.github/notes.md` for the short handoff from previous chats; "
                  "append 1-3 lines when the task finishes.")
+    lines.append("- For compatible external API tools, use only the trusted providers in "
+                 "`.github/spend-guard-providers.json`; use one primary and fallback only on failure.")
     for s in plan["specialists"]:
         if s["role"] == "checker":
             continue
@@ -756,6 +819,58 @@ def _seed_notes(folder: Path, log: list[str], dry: bool) -> None:
     log.append(f"wrote {path.as_posix()} (initial project notes)")
 
 
+def _provider_policy_json(policy: dict) -> str:
+    return json.dumps({
+        "description": f"{MARK}: opt-in provider policy; no credentials or provider SDKs",
+        "version": VERSION,
+        **policy,
+    }, indent=2) + "\n"
+
+
+DISPATCH_KEYWORDS = {
+    "sensitive": ("security", "authentication", "authorization", "permission", "secret", "credential",
+                  "password", "token", "signing", "cryptograph", "payment", "billing"),
+    "accuracy": ("invoice", "scan", "ocr", "document", "handwriting", "compliance", "legal", "extract"),
+    "code": ("implement", "feature", "fix", "bug", "refactor", "code", "test", "debug"),
+}
+
+
+def _task_kind(task: str) -> str:
+    text = task.lower()
+    for kind in ("sensitive", "accuracy", "code"):
+        if any(word in text for word in DISPATCH_KEYWORDS[kind]):
+            return kind
+    return "routine"
+
+
+def dispatch_task(folder: Path, task: str, free_quota_confirmed: bool = False) -> dict:
+    """Return a deterministic route for a compatible client; never invokes a provider."""
+    plan = validate_plan(load_plan(folder), load_tiers())
+    kind = _task_kind(task)
+    tier = {"routine": "cheap", "code": "standard", "accuracy": "accurate", "sensitive": "accurate"}[kind]
+    policy = plan["provider_policy"]
+    copilot = {"target": "copilot", "tier": tier, "model": load_tiers()[tier]["models"][0],
+               "model_calls": 0}
+    if not free_quota_confirmed:
+        return {**copilot, "kind": kind, "external_blocked": "free quota was not explicitly confirmed",
+                "reason": "external routing is free-only; use Copilot until quota is confirmed"}
+    fallback = {"target": "copilot", "tier": tier, "reason": "trusted local fallback"}
+    external_allowed = policy["dispatcher"]["external_mode"] == "compatible_tasks"
+    if kind == "sensitive":
+        external_allowed = external_allowed and policy["dispatcher"]["sensitive_external"] == "trusted_external"
+    candidates = policy["routing"][tier]
+    if kind == "sensitive":
+        candidates = [p for p in candidates if p in policy["sensitive_allowed"]]
+    if not external_allowed or not candidates:
+        return {**copilot, "kind": kind, "fallback": None,
+                "reason": "Copilot is the configured primary for this task"}
+    return {"kind": kind, "tier": tier, "target": "external", "provider": candidates[0],
+            "allowed_providers": candidates, "fallback": fallback, "model_calls": 0,
+            "cost_mode": "free_only",
+            "reason": "route-only decision; caller confirmed free quota; the calling client must execute "
+                       "the approved provider"}
+
+
 def _strip_jsonc(text: str) -> str:
     return re.sub(r'("(?:\\.|[^"\\])*")|//[^\n]*|/\*.*?\*/', lambda m: m.group(1) or "", text, flags=re.S)
 
@@ -903,6 +1018,7 @@ def apply(folder: Path, plan: dict, dry: bool = False) -> list[str]:
     _write_managed(hooks / "session_start.py", SESSION_START_PY, log, dry)
     guard_json = GUARD_JSON.replace('"version": 1,', f'"version": 1,\n  "description": "{MARK}",')
     _write_managed(hooks / "spend-guard.json", guard_json, log, dry)
+    _write_managed(folder / PROVIDER_POLICY_FILE, _provider_policy_json(plan["provider_policy"]), log, dry)
     _section(folder, render_section(plan, tiers), log, dry)
     if "claude" in plan["providers"]:
         claude_skills = folder / ".claude" / "skills"
@@ -955,6 +1071,11 @@ def load_plan(folder: Path) -> dict:
 def remove(folder: Path, dry: bool = False) -> list[str]:
     folder = folder.resolve()
     log: list[str] = []
+    provider_policy = folder / PROVIDER_POLICY_FILE
+    if provider_policy.exists() and MARK in provider_policy.read_text(encoding="utf-8", errors="replace"):
+        if not dry:
+            provider_policy.unlink()
+        log.append(f"removed {provider_policy.as_posix()}")
     for d in (folder / ".github" / "agents", folder / ".github" / "hooks"):
         for p in list(d.glob("*")) if d.exists() else []:
             if p.is_file() and MARK in p.read_text(encoding="utf-8", errors="replace"):
@@ -1317,6 +1438,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("query")
     s.add_argument("--all-workspaces", action="store_true",
                    help="search every identifiable local workspace session")
+    d = sub.add_parser("dispatch", help="choose a trusted route without making a model call")
+    d.add_argument("folder", type=Path)
+    d.add_argument("task")
+    d.add_argument("--free-quota-confirmed", action="store_true",
+                   help="allow an external route only when its free quota is confirmed")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "analyze":
@@ -1340,6 +1466,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(build_graph(args.folder), indent=2))
         elif args.cmd == "memory":
             print(json.dumps(memory_search(args.folder, args.query, all_workspaces=args.all_workspaces), indent=2))
+        elif args.cmd == "dispatch":
+            print(json.dumps(dispatch_task(args.folder, args.task, args.free_quota_confirmed), indent=2))
     except (ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

@@ -40,6 +40,20 @@ over 200 KB. It makes no network or model calls and writes `GRAPH_REPORT.md` und
 `.github/spend-guard-graph/`. The startup hook includes only the bounded report, never the graph or source
 contents.
 
+Applied projects also receive `.github/spend-guard-providers.json`, an opt-in policy for compatible
+external API tools. Its default allowlist is limited to Claude/Anthropic, GPT/OpenAI, Grok/xAI,
+NVIDIA and Gemini/Google. Use one primary provider and fall back only on an unavailable provider,
+timeout or failed validation. External routing is `free_only` and requires explicit free-quota
+confirmation; paid external fallback is blocked. Copilot models, including Copilot catalog Grok,
+remain the default route. This policy does not reroute GitHub Copilot's endpoint, stores no credentials,
+and does not add provider SDK dependencies.
+
+The route-only dispatcher (`spendguard.py dispatch <folder> <task> [--free-quota-confirmed]`) classifies
+work locally and returns JSON selecting Copilot or an approved external provider. Copilot is the default.
+An external route requires explicit confirmation that the provider's quota is free; sensitive tasks are
+limited to Anthropic/OpenAI and always retain a Copilot fallback. It makes no model or network calls and
+never reads credentials. The calling client must confirm quota and execute the route.
+
 Run the script as `python "<this skill folder>/spendguard.py" <command>` (on macOS/Linux `python3`).
 
 ## Setup in a project (`/spend-guard` or "set up spend-guard")
@@ -94,6 +108,8 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
   excludes subagent/automation sessions, redacts credential-like values, ignores `config.json`/`.env`
   references, includes source workspace paths, caps output at about 6,000 characters, and makes no model
   calls. It is on-demand rather than automatically injected, so it does not add tokens to ordinary requests.
+- **dispatch** (`spendguard.py dispatch <folder> <task>`): return a deterministic, route-only decision
+  between Copilot and an approved provider based on task kind. It never invokes a provider.
 
 ## Plan schema
 
@@ -105,6 +121,21 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
   "routine": ["running tests", "small edits", "docs", "git"],
   "test_command": "python -m pytest",
   "providers": ["copilot", "claude"],
+  "provider_policy": {
+    "allowed": ["anthropic", "openai", "xai", "nvidia", "google"],
+    "routing": {
+      "cheap": ["google", "openai", "nvidia"],
+      "standard": ["anthropic", "openai", "google"],
+      "accurate": ["anthropic", "openai"],
+      "checker": ["google", "xai"]
+    },
+    "dispatcher": {
+      "external_mode": "compatible_tasks",
+      "sensitive_external": "trusted_external",
+      "external_cost_mode": "free_only",
+      "require_free_quota_confirmation": true
+    }
+  },
   "avoid_files": ["data/rates.csv"],
   "rules": ["Never read or print `.env`."],
   "guard_tokens": 100000,
