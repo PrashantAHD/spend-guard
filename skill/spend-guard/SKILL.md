@@ -88,6 +88,12 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
 - **tiers** (`spendguard.py tiers [--init]`): show the model tiers; `--init` writes an editable copy to
   `~/.copilot/spend-guard/tiers.json`. After editing, run `update` in each project.
 - **graph** (`spendguard.py graph <folder>`): build or incrementally update the local code graph and report.
+- **memory search** (`spendguard.py memory search <folder> <query> [--all-workspaces]`): search approved
+  user and assistant messages from existing Copilot sessions. It is local-only, searches the current
+  workspace by default, and supports intentional cross-workspace lookup with `--all-workspaces`. It
+  excludes subagent/automation sessions, redacts credential-like values, ignores `config.json`/`.env`
+  references, includes source workspace paths, caps output at about 6,000 characters, and makes no model
+  calls. It is on-demand rather than automatically injected, so it does not add tokens to ordinary requests.
 
 ## Plan schema
 

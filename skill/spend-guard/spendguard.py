@@ -11,6 +11,8 @@ Commands:
     python spendguard.py remove <folder>                  remove everything Spend-Guard generated
     python spendguard.py report [--days N]                AI cost per project/model from local Copilot logs
     python spendguard.py tiers [--init]                   show model tiers (--init writes an editable copy)
+    python spendguard.py memory search <folder> <query> [--all-workspaces]
+                                                            search approved local session messages
 """
 
 from __future__ import annotations
@@ -37,6 +39,9 @@ NOTES_FILE = Path(".github") / "notes.md"
 GRAPH_DIR = Path(".github") / "spend-guard-graph"
 GRAPH_FILE = GRAPH_DIR / "graph.json"
 GRAPH_REPORT = GRAPH_DIR / "GRAPH_REPORT.md"
+MEMORY_MAX_OUTPUT = 6000
+MEMORY_MAX_MATCHES = 20
+MEMORY_MAX_MESSAGE = 700
 COPILOT_HOME = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
 TIERS_OVERRIDE = COPILOT_HOME / "spend-guard" / "tiers.json"
 
@@ -1170,6 +1175,116 @@ def report(days: int = 7, root: Path | None = None, now: dt.datetime | None = No
 
 
 # ---------------------------------------------------------------------------
+# local memory search
+# ---------------------------------------------------------------------------
+
+def _session_workspace(path: Path) -> str:
+    try:
+        for line in (path / "workspace.yaml").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("cwd:"):
+                return os.path.normcase(os.path.abspath(line[4:].strip().strip('"')))
+    except OSError:
+        pass
+    return ""
+
+
+def _automated_session(log: Path) -> bool:
+    try:
+        head = log.read_bytes()[:200_000].lower()
+    except OSError:
+        return True
+    return b"sub-agent" in head or b'"automation"' in head
+
+
+def _memory_message(record: object) -> str:
+    found: list[str] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                low = str(key).lower()
+                if isinstance(child, str) and (low in {"content", "text", "message", "prompt", "response"}
+                                               or low.endswith("content")):
+                    found.append(child)
+                elif isinstance(child, (dict, list)):
+                    walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(record)
+    return "\n".join(found).strip()
+
+
+def _safe_memory_text(text: str) -> str:
+    if re.search(r"(^|[\\/])(?:config\.json|\.env(?:\b|[.]))", text, re.I):
+        return ""
+    text = SECRET_VALUE.sub("[REDACTED]", text)
+    return "\n".join(text.splitlines()).strip()[:MEMORY_MAX_MESSAGE]
+
+
+def memory_search(folder: Path, query: str, home: Path | None = None,
+                  all_workspaces: bool = False) -> dict:
+    """Search local user/assistant messages without a model or network call."""
+    folder_key = os.path.normcase(os.path.abspath(str(folder)))
+    terms = [term.lower() for term in re.findall(r"\w+", query or "", re.UNICODE)]
+    if not terms:
+        raise ValueError("memory search query must contain text")
+    root = home or COPILOT_HOME
+    matches: list[dict] = []
+    sessions = []
+    for session in root.glob("session-state/*"):
+        workspace = _session_workspace(session)
+        if not session.is_dir() or (not all_workspaces and workspace != folder_key):
+            continue
+        log = session / "events.jsonl"
+        if not log.exists() or _automated_session(log):
+            continue
+        try:
+            sessions.append((log.stat().st_mtime, session.name, workspace, log))
+        except OSError:
+            continue
+    for _, sid, workspace, log in sorted(sessions, reverse=True):
+        try:
+            lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        session_matches = []
+        for raw in lines:
+            try:
+                record = json.loads(raw)
+            except ValueError:
+                continue
+            kind = str(record.get("type", "")).lower() if isinstance(record, dict) else ""
+            if "user.message" not in kind and "assistant.message" not in kind:
+                continue
+            text = _safe_memory_text(_memory_message(record))
+            if text and all(term in text.lower() for term in terms):
+                session_matches.append({"type": "user" if "user.message" in kind else "assistant",
+                                        "text": text})
+        if session_matches:
+            matches.append({"session_id": sid, "workspace": workspace, "matches": session_matches[-5:]})
+        if len(matches) >= MEMORY_MAX_MATCHES:
+            break
+    result = {
+        "workspace": str(folder),
+        "all_workspaces": all_workspaces,
+        "query": query,
+        "model_calls": 0,
+        "sessions": matches,
+    }
+    encoded = json.dumps(result, ensure_ascii=True, separators=(",", ":"))
+    while len(encoded) > MEMORY_MAX_OUTPUT and result["sessions"]:
+        last = result["sessions"][-1]
+        if last["matches"]:
+            last["matches"].pop(0)
+        if not last["matches"]:
+            result["sessions"].pop()
+        encoded = json.dumps(result, ensure_ascii=True, separators=(",", ":"))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1195,6 +1310,13 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--init", action="store_true", help=f"write an editable copy to {TIERS_OVERRIDE}")
     a = sub.add_parser("graph", help="build a local deterministic code graph")
     a.add_argument("folder", type=Path)
+    a = sub.add_parser("memory", help="search local same-workspace session memory")
+    memory_sub = a.add_subparsers(dest="memory_cmd", required=True)
+    s = memory_sub.add_parser("search", help="search approved user/assistant messages without model calls")
+    s.add_argument("folder", type=Path)
+    s.add_argument("query")
+    s.add_argument("--all-workspaces", action="store_true",
+                   help="search every identifiable local workspace session")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "analyze":
@@ -1216,6 +1338,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(load_tiers(), indent=2))
         elif args.cmd == "graph":
             print(json.dumps(build_graph(args.folder), indent=2))
+        elif args.cmd == "memory":
+            print(json.dumps(memory_search(args.folder, args.query, all_workspaces=args.all_workspaces), indent=2))
     except (ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

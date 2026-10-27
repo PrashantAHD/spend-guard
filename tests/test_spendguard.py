@@ -367,6 +367,64 @@ class ReportTests(Base):
         self.assertIn("Chats past 100k tokens of context: 1", text)
 
 
+class MemoryTests(Base):
+    def test_memory_search_is_workspace_scoped_redacted_and_local(self):
+        home = Path(self.tmp.name) / "home"
+
+        def add(sid, cwd, records, automated=False):
+            d = home / "session-state" / sid
+            d.mkdir(parents=True)
+            (d / "workspace.yaml").write_text(f"cwd: {cwd}\n", encoding="utf-8")
+            if automated:
+                records = [{"type": "session.usage_record",
+                            "data": {"usage": {"initiator": "sub-agent"}}}] + records
+            (d / "events.jsonl").write_text(
+                "\n".join(json.dumps(record) for record in records), encoding="utf-8")
+
+        add("same", self.dir, [
+            {"type": "user.message", "content": "Decided to keep the auth handoff local."},
+            {"type": "assistant.message", "content": "token=abc1234567890 decision recorded"},
+        ])
+        add("wrong", self.tmp.name, [{"type": "user.message", "content": "auth handoff wrong workspace"}])
+        add("bot", self.dir, [{"type": "user.message", "content": "auth handoff automation"}], automated=True)
+        result = S.memory_search(self.dir, "auth handoff", home=home)
+        self.assertEqual(result["model_calls"], 0)
+        self.assertEqual([s["session_id"] for s in result["sessions"]], ["same"])
+        text = json.dumps(result)
+        self.assertIn("keep the auth handoff local", text)
+        self.assertNotIn("abc1234567890", text)
+        self.assertNotIn("wrong workspace", text)
+        self.assertNotIn("automation", text)
+
+    def test_memory_search_caps_and_rejects_empty_query(self):
+        home = Path(self.tmp.name) / "home"
+        d = home / "session-state" / "long"
+        d.mkdir(parents=True)
+        (d / "workspace.yaml").write_text(f"cwd: {self.dir}\n", encoding="utf-8")
+        records = [{"type": "user.message", "content": "decision " + ("x" * 1000)}
+                   for _ in range(30)]
+        (d / "events.jsonl").write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+        result = S.memory_search(self.dir, "decision", home=home)
+        self.assertLessEqual(len(json.dumps(result, separators=(",", ":"))), S.MEMORY_MAX_OUTPUT)
+        with self.assertRaises(ValueError):
+            S.memory_search(self.dir, "   ", home=home)
+
+    def test_memory_search_can_explicitly_cross_workspace(self):
+        home = Path(self.tmp.name) / "home"
+        other = Path(self.tmp.name) / "other-project"
+        d = home / "session-state" / "other-session"
+        d.mkdir(parents=True)
+        (d / "workspace.yaml").write_text(f"cwd: {other}\n", encoding="utf-8")
+        (d / "events.jsonl").write_text(
+            json.dumps({"type": "user.message", "content": "shared routing decision"}), encoding="utf-8")
+        local = S.memory_search(self.dir, "shared routing", home=home)
+        self.assertEqual(local["sessions"], [])
+        cross = S.memory_search(self.dir, "shared routing", home=home, all_workspaces=True)
+        self.assertTrue(cross["all_workspaces"])
+        self.assertEqual(cross["sessions"][0]["workspace"], os.path.normcase(os.path.abspath(str(other))))
+        self.assertIn("shared routing decision", json.dumps(cross))
+
+
 class CliTests(Base):
     def test_cli_round_trip(self):
         script = HERE / "skill" / "spend-guard" / "spendguard.py"

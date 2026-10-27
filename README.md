@@ -338,6 +338,15 @@ The skill runs these for you; you can also run them yourself:
 | `python spendguard.py report [--days 7]` | Cost per project and model, vs the previous period |
 | `python spendguard.py tiers [--init]` | Show or customise the model tiers |
 | `python spendguard.py graph <folder>` | Build a local deterministic code graph and bounded `GRAPH_REPORT.md` |
+| `python spendguard.py memory search <folder> <query> [--all-workspaces]` | Search matching messages in local chats |
+
+`memory search` is on-demand only: it reads local Copilot session logs, excludes subagent and automation
+sessions, ignores messages mentioning `config.json` or `.env`, redacts credential-like values, and caps its
+JSON output at about 6,000 characters. It makes zero model calls and does not add context to new chats unless
+the agent explicitly runs it. By default it searches the current workspace; pass `--all-workspaces` when
+cross-workspace lookup is intentional. Results include the workspace path so the source is explicit. This
+provides a cheap way to recover a decision from another existing session without loading that session's full
+transcript.
 
 The script is in `~/.copilot/skills/spend-guard/` after installing. Plan format: see
 [SKILL.md](skill/spend-guard/SKILL.md#plan-schema).
