@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" role="img" aria-labelledby="title desc">
+  <title id="title">How Spend-Guard routes work</title>
+  <desc id="desc">A looping diagram: routine work stays cheap, code and security escalate, and chats past 100k tokens start a fresh cheap session.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="960" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#102A2A"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="960" height="420" rx="28" fill="url(#bg)"/>
+  <text x="48" y="46" fill="#E2E8F0" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="700">Spend-Guard in 12 seconds</text>
+  <text x="48" y="72" fill="#94A3B8" font-family="Segoe UI, Arial, sans-serif" font-size="14">Cheap by default. Stronger only when needed. New chat at 100k.</text>
+
+  <!-- user bubble -->
+  <g>
+    <rect x="48" y="108" width="210" height="86" rx="16" fill="#1E293B" stroke="#334155"/>
+    <text x="153" y="142" text-anchor="middle" fill="#94A3B8" font-family="Segoe UI, Arial, sans-serif" font-size="12">YOU ASK</text>
+    <text x="153" y="168" text-anchor="middle" fill="#F8FAFC" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" opacity="1">run the tests
+      <animate attributeName="opacity" values="1;1;0;0;0;0;1" keyTimes="0;0.28;0.33;0.62;0.67;0.95;1" dur="12s" repeatCount="indefinite"/>
+    </text>
+    <text x="153" y="168" text-anchor="middle" fill="#F8FAFC" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" opacity="0">fix auth login
+      <animate attributeName="opacity" values="0;0;1;1;0;0;0" keyTimes="0;0.28;0.33;0.62;0.67;0.95;1" dur="12s" repeatCount="indefinite"/>
+    </text>
+    <text x="153" y="168" text-anchor="middle" fill="#F8FAFC" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" opacity="0">keep going…
+      <animate attributeName="opacity" values="0;0;0;0;1;1;0" keyTimes="0;0.28;0.33;0.62;0.67;0.95;1" dur="12s" repeatCount="indefinite"/>
+    </text>
+  </g>
+
+  <!-- packet -->
+  <circle r="9" fill="#38BDF8" filter="url(#glow)">
+    <animate attributeName="cx" values="270;360;360;360;270" keyTimes="0;0.12;0.88;0.94;1" dur="12s" repeatCount="indefinite"/>
+    <animate attributeName="cy" values="151;151;151;151;151" dur="12s" repeatCount="indefinite"/>
+  </circle>
+  <path d="M270 151 H348" stroke="#334155" stroke-width="3" fill="none"/>
+
+  <!-- router -->
+  <g transform="translate(360,108)">
+    <rect width="120" height="86" rx="16" fill="#0F766E"/>
+    <text x="60" y="38" text-anchor="middle" fill="#CCFBF1" font-family="Segoe UI, Arial, sans-serif" font-size="12">ROUTER</text>
+    <text x="60" y="62" text-anchor="middle" fill="#F0FDFA" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">pick a tier</text>
+  </g>
+
+  <!-- four lanes -->
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <g transform="translate(520,100)">
+      <rect width="392" height="52" rx="12" fill="url(#card)" stroke="#22C55E" stroke-width="2">
+        <animate attributeName="stroke-opacity" values="1;1;0.25;0.25;0.25;1" keyTimes="0;0.28;0.33;0.67;0.95;1" dur="12s" repeatCount="indefinite"/>
+      </rect>
+      <text x="18" y="22" fill="#86EFAC" font-size="12">CHEAP · Luna</text>
+      <text x="18" y="40" fill="#F8FAFC" font-size="14" font-weight="700">tests, docs, git, reports</text>
+    </g>
+    <g transform="translate(520,160)">
+      <rect width="392" height="52" rx="12" fill="url(#card)" stroke="#38BDF8" stroke-width="2" stroke-opacity="0.25">
+        <animate attributeName="stroke-opacity" values="0.25;0.25;1;1;0.25;0.25" keyTimes="0;0.28;0.33;0.55;0.62;1" dur="12s" repeatCount="indefinite"/>
+      </rect>
+      <text x="18" y="22" fill="#7DD3FC" font-size="12">STANDARD · Sonnet / Sol</text>
+      <text x="18" y="40" fill="#F8FAFC" font-size="14" font-weight="700">write and fix code</text>
+    </g>
+    <g transform="translate(520,220)">
+      <rect width="188" height="52" rx="12" fill="url(#card)" stroke="#F59E0B" stroke-width="2" stroke-opacity="0.25">
+        <animate attributeName="stroke-opacity" values="0.25;0.25;0.25;1;1;0.25;0.25" keyTimes="0;0.33;0.48;0.52;0.62;0.67;1" dur="12s" repeatCount="indefinite"/>
+      </rect>
+      <text x="14" y="22" fill="#FCD34D" font-size="11">ACCURATE · Opus</text>
+      <text x="14" y="40" fill="#F8FAFC" font-size="13" font-weight="700">security review</text>
+    </g>
+    <g transform="translate(724,220)">
+      <rect width="188" height="52" rx="12" fill="url(#card)" stroke="#A78BFA" stroke-width="2" stroke-opacity="0.25"/>
+      <text x="14" y="22" fill="#DDD6FE" font-size="11">CHECKER · Astra</text>
+      <text x="14" y="40" fill="#F8FAFC" font-size="13" font-weight="700">second pass</text>
+    </g>
+  </g>
+
+  <!-- 100k bar -->
+  <g transform="translate(48,300)" font-family="Segoe UI, Arial, sans-serif">
+    <text x="0" y="0" fill="#94A3B8" font-size="13">Chat size</text>
+    <rect y="12" width="864" height="18" rx="9" fill="#1E293B"/>
+    <rect y="12" height="18" rx="9" fill="#F59E0B">
+      <animate attributeName="width" values="80;220;220;820;864;80" keyTimes="0;0.28;0.62;0.78;0.88;1" dur="12s" repeatCount="indefinite"/>
+    </rect>
+    <text x="432" y="26" text-anchor="middle" fill="#0B1220" font-size="11" font-weight="700">100k token cap</text>
+  </g>
+
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <rect x="48" y="348" width="420" height="48" rx="14" fill="#1E293B" stroke="#334155"/>
+    <text x="258" y="378" text-anchor="middle" fill="#CBD5E1" font-size="15">Long chat stays here until the cap</text>
+    <g opacity="0">
+      <animate attributeName="opacity" values="0;0;0;1;1;0" keyTimes="0;0.62;0.7;0.78;0.95;1" dur="12s" repeatCount="indefinite"/>
+      <rect x="492" y="348" width="420" height="48" rx="14" fill="#14532D" stroke="#22C55E"/>
+      <text x="702" y="378" text-anchor="middle" fill="#BBF7D0" font-size="15" font-weight="700">create_session → fresh Luna chat</text>
+    </g>
+  </g>
+</svg>
