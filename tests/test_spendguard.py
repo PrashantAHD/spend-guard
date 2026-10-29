@@ -50,9 +50,12 @@ class Base(unittest.TestCase):
         (self.dir / "README.md").write_text("# Billing\n")
         self._old = S.TIERS_OVERRIDE
         S.TIERS_OVERRIDE = Path(self.tmp.name) / "no-tiers.json"
+        self._old_projects = S.PROJECTS_FILE
+        S.PROJECTS_FILE = Path(self.tmp.name) / "projects.json"
 
     def tearDown(self):
         S.TIERS_OVERRIDE = self._old
+        S.PROJECTS_FILE = self._old_projects
         self.tmp.cleanup()
 
     def read(self, rel):
@@ -68,6 +71,30 @@ class AnalyzeTests(Base):
         self.assertEqual(a["secret_files"], [".env"])
         self.assertEqual(a["sensitive_code"], ["src/auth/login.py"])
         self.assertFalse(a["existing_customizations"]["AGENTS.md"])
+        self.assertEqual(a["summary"], "Billing")
+        self.assertEqual(a["workflows"], [])
+
+    def test_propose_plan_adapts_to_scanned_workflows(self):
+        skill = self.dir / ".github" / "skills" / "nightly-report"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: nightly-report\n---\nRefresh reports from saved output.\n",
+                                        encoding="utf-8")
+        extract = self.dir / ".github" / "skills" / "invoice-extract"
+        extract.mkdir(parents=True)
+        (extract / "SKILL.md").write_text("---\nname: invoice-extract\n---\nRead scanned invoices.\n",
+                                          encoding="utf-8")
+        plan = S.propose_plan(self.dir)
+        self.assertEqual(plan["project"], "proj")
+        self.assertIn("nightly report", plan["cheap_overrides"])
+        self.assertNotIn("php2shell", json.dumps(plan).lower())
+        roles = {s["role"]: s for s in plan["specialists"]}
+        self.assertIn("developer", roles)
+        self.assertIn("reviewer", roles)
+        self.assertIn("extractor", roles)
+        self.assertIn("before a push", roles["reviewer"]["when"])
+        self.assertEqual(plan["review_policy"]["max_rounds"], 2)
+        self.assertEqual(plan["guard_tokens"], 100_000)
+        self.assertTrue(any(".env" in rule for rule in plan["rules"]))
 
     def test_skips_envs_and_bundled_tools_and_finds_secret_values(self):
         venv = self.dir / ".venv-cad" / "Lib" / "site-packages"
@@ -147,6 +174,59 @@ class ApplyTests(Base):
         self.assertEqual(security_external["fallback"]["target"], "copilot")
         self.assertEqual(security_external["cost_mode"], "free_only")
         self.assertEqual(security_external["model_calls"], 0)
+
+    def test_review_cap_cheap_overrides_and_long_chat_stop(self):
+        plan = dict(PLAN, cheap_overrides=["nightly report refresh",
+                                           "regenerating reports from saved evidence"])
+        S.apply(self.dir, plan)
+        main = self.read(".github/agents/billing.agent.md")
+        self.assertIn("Match the first applicable row", main)
+        self.assertIn("nightly report refresh", main)
+        self.assertIn("Immediately before a push or pull request", main)
+        self.assertIn("At most 2 review rounds", main)
+        self.assertIn("Only Critical/High findings block", main)
+        self.assertIn("cheap overrides and routine win over specialists", main)
+        rev = self.read(".github/agents/billing-security-reviewer.agent.md")
+        self.assertIn("At most 2 rounds", rev)
+        self.assertIn("never mid-task", rev)
+        agents_md = self.read("AGENTS.md")
+        self.assertIn("call `create_session`", agents_md)
+        self.assertIn("Do not ask the user to start a chat", agents_md)
+        self.assertIn("Keep them short", agents_md)
+        saved = json.loads(self.read(".github/spend-guard.json"))
+        self.assertEqual(saved["review_policy"]["max_rounds"], 2)
+        self.assertEqual(saved["cheap_overrides"][0], "nightly report refresh")
+        refresh = S.dispatch_task(self.dir, "nightly report refresh from retained evidence")
+        self.assertEqual((refresh["kind"], refresh["tier"]), ("routine", "cheap"))
+        regen = S.dispatch_task(self.dir, "regenerating reports from saved evidence")
+        self.assertEqual((regen["kind"], regen["tier"]), ("routine", "cheap"))
+        mismatch = S.dispatch_task(self.dir, "inventory counts don't reconcile")
+        self.assertEqual((mismatch["kind"], mismatch["tier"]), ("accuracy", "accurate"))
+        self.assertFalse(S._is_cheap_override_task("php2shell daily refresh", PLAN))
+
+    def test_validate_warns_on_long_always_loaded_instructions(self):
+        S.apply(self.dir, PLAN)
+        instr = self.dir / ".github" / "instructions"
+        instr.mkdir(parents=True, exist_ok=True)
+        (instr / "wide.instructions.md").write_text(
+            "---\napplyTo: '**'\n---\n" + ("keep this short\n" * 50), encoding="utf-8")
+        result = S.validate_project(self.dir)
+        self.assertTrue(any("always-loaded instruction file" in w and "wide.instructions.md" in w
+                            for w in result["warnings"]))
+
+    def test_cheap_first_rule_is_built_into_every_agent(self):
+        S.apply(self.dir, {**PLAN, "providers": ["copilot", "claude"]})
+        agents = list((self.dir / ".github" / "agents").glob("*.agent.md"))
+        self.assertTrue(agents)
+        for path in agents:
+            self.assertEqual(path.read_text(encoding="utf-8").count(S.CHEAP_FIRST_RULE), 1, path.name)
+        self.assertIn(S.CHEAP_FIRST_RULE, self.read("AGENTS.md"))
+        self.assertIn(S.CHEAP_FIRST_RULE, self.read("CLAUDE.md"))
+        for path in (self.dir / ".claude" / "skills").rglob("SKILL.md"):
+            self.assertIn(S.CHEAP_FIRST_RULE, path.read_text(encoding="utf-8"), path.parent.name)
+        self.assertIn("cheap-first rule is present in the main agent", S.validate_project(self.dir)["checks"])
+        S.apply(self.dir, {**PLAN, "rules": PLAN["rules"] + [S.CHEAP_FIRST_RULE]})
+        self.assertEqual(self.read(".github/agents/billing.agent.md").count(S.CHEAP_FIRST_RULE), 1)
 
     def test_validate_audits_generated_setup_without_running_project_code(self):
         S.apply(self.dir, PLAN)
@@ -285,13 +365,17 @@ class ApplyTests(Base):
 
 
 class GuardTests(Base):
-    def run_guard(self, payload, tokens, home):
+    def run_guard(self, payload, tokens, home, extra_env=None, check_update=False):
         sid = "s1"
         d = home / "session-state" / sid
         d.mkdir(parents=True, exist_ok=True)
         rec = {"type": "session.usage_record", "data": {"usage": {"inputTokens": tokens, "initiator": "user"}}}
         (d / "events.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
         env = dict(os.environ, COPILOT_HOME=str(home))
+        if not check_update:
+            env["SPEND_GUARD_SKIP_UPDATE_CHECK"] = "1"
+        if extra_env:
+            env.update(extra_env)
         out = subprocess.run([sys.executable, str(self.dir / ".github" / "hooks" / "spend_guard.py")],
                              input=json.dumps({"sessionId": sid, **payload}).encode(), capture_output=True,
                              env=env, timeout=20)
@@ -305,6 +389,8 @@ class GuardTests(Base):
         self.assertTrue(out["modifiedTransformedPrompt"].startswith("add a feature\n\n[Spend-Guard"))
         self.assertIn("~250k", out["modifiedTransformedPrompt"])
         self.assertIn('"gpt-5.6-luna"', out["modifiedTransformedPrompt"])
+        self.assertIn("Call create_session NOW", out["modifiedTransformedPrompt"])
+        self.assertIn("Do not ask the user to start a chat", out["modifiedTransformedPrompt"])
         env = dict(os.environ, COPILOT_HOME=str(home))
         bad = subprocess.run([sys.executable, str(self.dir / ".github" / "hooks" / "spend_guard.py")],
                              input=b"not json", capture_output=True, env=env, timeout=20)
@@ -317,8 +403,28 @@ class GuardTests(Base):
         home = Path(self.tmp.name) / "home"
         out = json.loads(self.run_guard({"transformedPrompt": "secret-ish raw prompt", "cwd": str(self.dir)},
                                         250_000, home))
-        self.assertIn("never the user's message verbatim", out["modifiedTransformedPrompt"])
+        self.assertIn("never the user message", out["modifiedTransformedPrompt"])
         self.assertEqual(notes.read_text(encoding="utf-8"), before)
+
+    def test_guard_prompts_upgrade_once_per_day(self):
+        S.apply(self.dir, PLAN)
+        home = Path(self.tmp.name) / "home"
+        skill = home / "skills" / "spend-guard" / "spendguard.py"
+        skill.parent.mkdir(parents=True)
+        skill.write_text('VERSION = "1.4.0"\n', encoding="utf-8")
+        plan_path = self.dir / ".github" / "spend-guard.json"
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+        data["spend_guard_version"] = "1.0.0"
+        plan_path.write_text(json.dumps(data), encoding="utf-8")
+        payload = {"transformedPrompt": "hi", "cwd": str(self.dir)}
+        extra = {"SPEND_GUARD_LATEST_VERSION": "9.9.9"}
+        out = json.loads(self.run_guard(payload, 5_000, home, extra_env=extra, check_update=True))
+        note = out["modifiedTransformedPrompt"]
+        self.assertTrue(note.startswith("hi"))
+        self.assertIn("9.9.9", note)
+        self.assertIn("Upgrade Spend-Guard", note)
+        self.assertIn("1.0.0", note)
+        self.assertEqual(self.run_guard(payload, 5_000, home, extra_env=extra, check_update=True), "{}")
 
     def run_session_start(self, payload, home):
         out = subprocess.run([sys.executable, str(self.dir / ".github" / "hooks" / "session_start.py")],
@@ -473,6 +579,40 @@ class MemoryTests(Base):
         self.assertTrue(cross["all_workspaces"])
         self.assertEqual(cross["sessions"][0]["workspace"], os.path.normcase(os.path.abspath(str(other))))
         self.assertIn("shared routing decision", json.dumps(cross))
+
+
+class RegistryTests(Base):
+    def test_stale_prompts_update_for_registered_projects(self):
+        S.apply(self.dir, PLAN)
+        current = S.stale_projects()
+        self.assertEqual(current["current_version"], S.VERSION)
+        self.assertEqual(current["outdated"], [])
+        self.assertEqual(len(current["projects"]), 1)
+        plan_path = self.dir / ".github" / "spend-guard.json"
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+        data["spend_guard_version"] = "1.0.0"
+        plan_path.write_text(json.dumps(data), encoding="utf-8")
+        stale = S.stale_projects()
+        self.assertEqual(len(stale["outdated"]), 1)
+        self.assertEqual(stale["outdated"][0]["status"], "outdated")
+        self.assertIn("new features", stale["prompt"])
+        self.assertEqual(os.path.normcase(str(self.dir.resolve())), stale["outdated"][0]["folder"])
+        result = S.validate_project(self.dir)
+        self.assertTrue(any("behind" in w for w in result["warnings"]))
+        S.remove(self.dir)
+        self.assertEqual(S.stale_projects()["projects"], [])
+
+    def test_stale_checks_unregistered_folder_when_passed(self):
+        S.apply(self.dir, PLAN)
+        S._unregister_project(self.dir)
+        self.assertEqual(S.stale_projects()["projects"], [])
+        plan_path = self.dir / ".github" / "spend-guard.json"
+        data = json.loads(plan_path.read_text(encoding="utf-8"))
+        data["spend_guard_version"] = "1.0.0"
+        plan_path.write_text(json.dumps(data), encoding="utf-8")
+        stale = S.stale_projects([self.dir])
+        self.assertEqual(stale["outdated"][0]["status"], "outdated")
+        self.assertIn("new features", stale["prompt"])
 
 
 class CliTests(Base):

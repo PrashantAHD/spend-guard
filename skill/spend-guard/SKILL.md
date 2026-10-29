@@ -1,7 +1,7 @@
 ---
 name: spend-guard
 description: 'Cut AI (Copilot/agent) spend in a project: a cheap default model for routine work, automatic hand-off of coding, security reviews and accuracy-critical work to stronger models, an optional independent second pass, and a guard that moves new tasks out of long chats. Use when asked to reduce AI costs, set up model routing, add Spend-Guard to a project, update or remove it, or report AI spend.'
-argument-hint: 'setup | update | remove | report'
+argument-hint: 'setup | update | remove | report | stale'
 ---
 
 # Spend-Guard
@@ -33,6 +33,10 @@ The generated `sessionStart` hook automatically adds the capped notes and a dete
 most recently modified previous chat in the same workspace to startup context. It reads local session logs
 only, makes no model call, and fails open if the input or logs are unavailable.
 
+The generated `userPromptTransformed` hook, on the first prompt of each local day in an applied
+tool, checks whether a newer Spend-Guard version exists. If it does, it asks the user to upgrade
+and still continues the user's request. Later prompts that day stay quiet. The check fails open.
+
 An optional `spendguard.py graph <folder>` command builds a local deterministic code graph from supported
 source files using the Python standard library. It records only relative paths, symbol names, imports and
 SHA-256 fingerprints; it excludes secret-looking files, symlinks, dependency/build directories and files
@@ -56,13 +60,23 @@ never reads credentials. The calling client must confirm quota and execute the r
 
 Run the script as `python "<this skill folder>/spendguard.py" <command>` (on macOS/Linux `python3`).
 
+**On every Spend-Guard request:** run `spendguard.py stale <workspace folder>` first. That checks
+the current tool plus any previously applied tools. If `outdated` is not empty, tell the user
+which ones are behind this version and ask whether to `update` them now. Do not update without
+confirmation.
+
 ## Setup in a project (`/spend-guard` or "set up spend-guard")
 
 1. **Check it's allowed.** If the repository looks like company or client work, ask the user to confirm
    their employer allows changing how AI tools are used there. Never send code anywhere new.
-2. **Analyse:** `spendguard.py analyze <workspace folder>`. Then skim the README (first ~60 lines) and any
-   existing `AGENTS.md`/`.github/copilot-instructions.md`. Don't read big files.
-3. **Draft a plan** (JSON, schema below):
+2. **Scan the tool:** `spendguard.py analyze <workspace folder>` then
+   `spendguard.py propose <workspace folder>`. Propose reads that project's skills, instructions,
+   languages, tests, secrets and sensitive paths and drafts a routing plan for *this* tool — cheap
+   default, specialists, `cheap_overrides` from workflows it found, review cap, and the 100k-token
+   new-chat guard. It does not hardcode another product's task names. Skim the README (first ~60
+   lines) and any existing `AGENTS.md`/`.github/copilot-instructions.md` only to tighten the
+   one-line summary. Don't read big files.
+3. **Adjust the drafted plan** (JSON, schema below) rather than writing one from scratch:
    - `project`, `main_name` (short, e.g. the project name), one-line `summary`.
    - `routine`: what the cheap main agent does itself (run tests, regenerate outputs, docs, git, ...).
    - `test_command` from the analysis.
@@ -93,6 +107,8 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
 
 ## Other commands
 
+- **propose** (`spendguard.py propose <folder>`): scan the project and print a draft plan. First-time
+  setup should start here so routing matches that tool's workflows, not a built-in list.
 - **update** (`spendguard.py update <folder>`): re-render everything from the saved plan, e.g. after
   editing `.github/spend-guard.json` or the model tiers.
 - **remove** (`spendguard.py remove <folder>`): removes only what Spend-Guard created.
@@ -113,6 +129,9 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
 - **validate** (`spendguard.py validate <folder> [--strict]`): audit the generated setup, hooks, notes,
   provider policy, syntax and reviewer coverage without running project code or making model/network
   calls. Strict mode turns warnings into failures.
+- **stale** (`spendguard.py stale [folder ...]`): list applied tools whose saved
+  `spend_guard_version` is behind this skill. Pass the current workspace so unregistered tools
+  are still checked. Prompt the user to `update` each outdated one.
 
 ## Plan schema
 
@@ -142,6 +161,12 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
   "avoid_files": ["data/rates.csv"],
   "rules": ["Never read or print `.env`."],
   "guard_tokens": 100000,
+  "cheap_overrides": ["nightly report refresh", "regenerating reports from saved evidence"],
+  "review_policy": {
+    "max_rounds": 2,
+    "blocking_severities": ["critical", "high"],
+    "when": "before_push"
+  },
   "specialists": [
     {"name": "Billing Developer", "role": "developer", "when": "Code changes beyond a one-line fix"},
     {"name": "Billing Security Reviewer", "role": "reviewer",
@@ -156,3 +181,15 @@ Run the script as `python "<this skill folder>/spendguard.py" <command>` (on mac
 `role`: developer | reviewer | extractor | custom. `tier` defaults by role (developer: standard,
 reviewer and extractor: accurate, custom: standard). `read_only` defaults to true for reviewers.
 `instructions` adds project-specific guidance to that agent.
+
+`cheap_overrides` are project-specific phrases (not hardcoded tool names). They are matched before
+specialists and stay on the cheap model. Escalate those to the extractor/checker only when counts
+or IDs do not reconcile. Each consuming project lists its own overrides in its plan.
+
+Every generated agent (Copilot and Claude) and the always-loaded routing section include a built-in
+cheap-first rule: always prefer the cheapest capable model for simple tasks, and use lightweight
+subagents for simple delegated work. It needs no plan entry; `validate` warns if the main agent lacks it.
+`review_policy` defaults to at most 2 rounds, only Critical/High findings block, and review only
+immediately before a push. The 100k-token hook tells the agent to stop and start a fresh cheap chat
+instead of continuing past the cap. `validate` warns when always-loaded instruction files
+(`applyTo: '**'` or `.github/copilot-instructions.md`) are longer than 40 lines.

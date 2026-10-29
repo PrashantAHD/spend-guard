@@ -11,7 +11,7 @@ models only for the work that needs them.
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Copilot](https://img.shields.io/badge/GitHub%20Copilot-agents-000000?logo=githubcopilot&logoColor=white)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-2EA44F)
-![Tests](https://img.shields.io/badge/tests-25%20passing-2EA44F)
+![Tests](https://img.shields.io/badge/tests-38%20passing-2EA44F)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
 </div>
@@ -35,11 +35,12 @@ long-running chat cost more than half the total.
 
 | | What | How |
 |---|---|---|
-| 💸 | **Cheap by default** | New chats in the project start on a low-cost model (`chat.defaultModel`) |
+| 🔎 | **Scan on first setup** | `propose` reads the project's skills, instructions, tests and sensitive paths and drafts routing for *that* tool |
+| 🔔 | **Update alert** | First prompt of the day in an applied tool checks for a newer Spend-Guard version and asks to upgrade; `stale` lists applied tools still behind |
 | 🧭 | **Automatic hand-off** | A main agent does routine work itself and delegates to specialists on stronger models: a developer for code, a read-only reviewer for security-sensitive changes, an accurate reader for critical documents |
 | 🧩 | **Claude Skills support** | Optionally generates Claude Code `SKILL.md` files and a marked `CLAUDE.md` routing section from the same plan |
 | 🔁 | **Independent second pass** | For accuracy-critical extraction (handwriting, scans, invoices), a checker on a *different model family* re-reads the same locations without seeing the first answers; disagreements go to you |
-| ✂️ | **Short chats** | A hook watches the chat's size. Past ~100k tokens it asks the agent to move a *new* task to a fresh chat with a short handoff |
+| ✂️ | **Short chats** | A hook watches the chat's size. Past ~100k tokens it tells the agent to stop, write a notes.md line, and call `create_session` on the cheap model with the handoff — not to ask the user to paste |
 | 📝 | **Project handoff notes** | Each project gets a small `.github/notes.md` file for durable decisions and half-done work, so new chats read context without carrying full history |
 | 🚀 | **Automatic startup context** | A fast `sessionStart` hook adds capped notes and the previous same-workspace chat's recent user messages and final answer, with no model call |
 | 🕸️ | **Local code graph** | An optional standard-library graph extracts code files, symbols and imports locally, caches unchanged files by SHA-256, and adds a small report to startup context |
@@ -80,9 +81,19 @@ Different work can use different model tiers:
 ### Prevents oversized chats
 
 - The cost guard detects long conversations.
-- It recommends moving new work to a fresh chat.
+- Once the ~100k-token note appears, work must move to a fresh cheap chat.
 - It creates a short handoff instead of carrying the entire transcript.
-- This reduces repeated context-token costs.
+- This reduces repeated context-token costs. A 5-word follow-up in a 300k-token
+  chat on a top model can cost as much as a long task in a new cheap chat.
+- Security review is capped at 2 rounds, only Critical/High findings block, and
+  review runs only before a push.
+- Plan `cheap_overrides` stay on the cheap model unless counts or IDs do not
+  reconcile. Consuming projects list their own override phrases; Spend-Guard
+  does not hardcode another tool's workflow.
+- Every generated agent carries a built-in cheap-first rule: simple tasks (questions,
+  status checks, lookups, small edits, docs, git, running existing scripts) stay on the
+  cheapest capable model, and simple delegated work goes to lightweight subagents.
+- `validate` warns when always-loaded instruction files are long enough to tax every turn.
 
 ### Automatic context continuity
 

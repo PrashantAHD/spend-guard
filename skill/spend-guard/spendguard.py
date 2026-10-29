@@ -6,6 +6,7 @@ chats short. Standard library only, Python 3.10+.
 
 Commands:
     python spendguard.py analyze <folder>                 facts about a project (JSON)
+    python spendguard.py propose <folder>                 draft a routing plan from those facts
     python spendguard.py apply <folder> --plan plan.json  generate/refresh the setup from a plan
     python spendguard.py update <folder>                  re-render from the saved plan (e.g. new model tiers)
     python spendguard.py remove <folder>                  remove everything Spend-Guard generated
@@ -15,6 +16,7 @@ Commands:
                                                             search approved local session messages
     python spendguard.py dispatch <folder> <task>           choose a trusted route without making a model call
     python spendguard.py validate <folder> [--strict]      audit the local Spend-Guard setup
+    python spendguard.py stale [folder ...]                list applied projects behind this Spend-Guard version
 """
 
 from __future__ import annotations
@@ -30,8 +32,9 @@ import re
 import sys
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.5.0"
 MARK = "managed by spend-guard"
+LATEST_VERSION_URL = "https://raw.githubusercontent.com/PrashantAHD/spend-guard/main/skill/spend-guard/spendguard.py"
 SECTION_START = "<!-- spend-guard:start -->"
 SECTION_END = "<!-- spend-guard:end -->"
 CLAUDE_SECTION_START = "<!-- spend-guard:claude:start -->"
@@ -47,6 +50,7 @@ MEMORY_MAX_MATCHES = 20
 MEMORY_MAX_MESSAGE = 700
 COPILOT_HOME = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
 TIERS_OVERRIDE = COPILOT_HOME / "spend-guard" / "tiers.json"
+PROJECTS_FILE = COPILOT_HOME / "spend-guard" / "projects.json"
 
 DEFAULT_TIERS: dict[str, dict] = {
     "cheap": {"models": ["GPT-5.6 Luna (copilot)", "GPT-5.4 nano (copilot)"], "default_model_id": "gpt-5.6-luna",
@@ -79,6 +83,27 @@ DEFAULT_PROVIDER_POLICY = {
         "require_free_quota_confirmation": True,
     },
 }
+DEFAULT_REVIEW_POLICY = {
+    "max_rounds": 2,
+    "blocking_severities": ["critical", "high"],
+    "when": "before_push",
+}
+REVIEW_WHEN = ("before_push", "on_sensitive_change")
+REVIEW_SEVERITIES = ("critical", "high", "medium", "low")
+ALWAYS_LOADED_WARN_LINES = 40
+CHEAP_FIRST_RULE = ("Always prefer the cheapest capable model: keep simple tasks (questions, status checks, "
+                    "lookups, cost reports, small edits, docs, git, running existing scripts) on the cheap tier, "
+                    "and use lightweight subagents rather than premium ones for simple delegated work.")
+LONG_CHAT_RULE = ("When a [Spend-Guard] long-chat note appears, stop this chat: append one line to "
+                  "`.github/notes.md`, then call `create_session` (cheap default model, this workspace, "
+                  "short title, prompt = ≤15-line handoff + the user's request). Reply with the new chat "
+                  "link only. Do not ask the user to start a chat or paste a handoff unless `create_session` "
+                  "is missing from your tools.")
+RECONCILE_MARKERS = ("reconcil", "do not match", "don't match", "does not match",
+                     "count mismatch", "counts don't", "counts do not")
+CHEAP_WORKFLOW = re.compile(r"(refresh|report|collect|generat|dashboard|inventory|snapshot|daily)", re.I)
+ACCURACY_WORKFLOW = re.compile(r"(extract|ocr|scan|invoice|handwrit|reconcil|evidence)", re.I)
+NOT_CHEAP_WORKFLOW = re.compile(r"(review|security|auth)", re.I)
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "env", "__pycache__", "dist", "build", "target", "bin", "obj",
              ".next", ".tox", ".mypy_cache", ".pytest_cache", "vendor", "coverage", ".idea"}
 LANG_EXT = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript", ".jsx": "JavaScript",
@@ -201,6 +226,98 @@ def analyze(folder: Path) -> dict:
         "docs": sorted(docs)[:10],
         "existing_customizations": existing,
         "always_loaded_instructions": always_on,
+        "workflows": _project_workflows(folder),
+        "summary": _readme_summary(folder),
+    }
+
+
+def _humanize(name: str) -> str:
+    return re.sub(r"[-_]+", " ", name).strip()
+
+
+def _readme_summary(folder: Path) -> str:
+    for name in ("README.md", "readme.md"):
+        path = folder / name
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[:60]
+        except OSError:
+            return ""
+        for line in lines:
+            text = line.strip().lstrip("#").strip()
+            if text and not text.startswith("!["):
+                return text[:160]
+    return ""
+
+
+def _project_workflows(folder: Path) -> list[dict]:
+    found: list[dict] = []
+    skills = folder / ".github" / "skills"
+    if skills.exists():
+        for skill_md in sorted(skills.glob("*/SKILL.md")):
+            found.append({"kind": "skill", "name": _humanize(skill_md.parent.name),
+                          "path": skill_md.relative_to(folder).as_posix()})
+    instructions = folder / ".github" / "instructions"
+    if instructions.exists():
+        for instr in sorted(instructions.glob("*.instructions.md")):
+            found.append({"kind": "instruction", "name": _humanize(instr.name.replace(".instructions.md", "")),
+                          "path": instr.relative_to(folder).as_posix()})
+    return found[:30]
+
+
+def propose_plan(folder: Path) -> dict:
+    """Draft a project-specific routing plan from a local scan. No tool names are hardcoded."""
+    folder = folder.resolve()
+    facts = analyze(folder)
+    name = facts["name"]
+    cheap_overrides = []
+    wants_extractor = False
+    for workflow in facts["workflows"]:
+        label = workflow["name"]
+        if NOT_CHEAP_WORKFLOW.search(label):
+            continue
+        if CHEAP_WORKFLOW.search(label) and label not in cheap_overrides:
+            cheap_overrides.append(label)
+        if ACCURACY_WORKFLOW.search(label):
+            wants_extractor = True
+    if any(item["path"].lower().endswith(".pdf") for item in facts["big_files"]):
+        wants_extractor = True
+    specialists = []
+    if facts["languages"]:
+        specialists.append({
+            "name": f"{name} Developer", "role": "developer",
+            "when": "Code changes beyond a one-line fix",
+        })
+    if facts["sensitive_code"]:
+        areas = ", ".join(facts["sensitive_code"][:5])
+        specialists.append({
+            "name": f"{name} Security Reviewer", "role": "reviewer",
+            "when": f"Immediately before a push or pull request (sensitive areas include {areas})",
+        })
+    if wants_extractor:
+        specialists.append({
+            "name": f"{name} Accuracy Reader", "role": "extractor", "double_check": True,
+            "when": "Only when counts, IDs or extracted values do not reconcile",
+        })
+    rules = [f"Never read or print `{path}`." for path in facts["secret_files"][:8]]
+    rules += [f"Search `{item['path']}` and read only the ranges you need."
+              for item in facts["big_code_files"][:8]]
+    routine = ["running tests", "small edits", "docs", "git"]
+    if cheap_overrides:
+        routine.append("running existing generator or refresh scripts")
+    return {
+        "project": name,
+        "main_name": name,
+        "summary": facts["summary"],
+        "routine": routine,
+        "test_command": (facts["test_commands"] or [""])[0],
+        "avoid_files": [item["path"] for item in facts["big_files"][:12]],
+        "rules": rules,
+        "guard_tokens": 100_000,
+        "cheap_overrides": cheap_overrides,
+        "review_policy": dict(DEFAULT_REVIEW_POLICY),
+        "specialists": specialists,
     }
 
 
@@ -263,6 +380,25 @@ def validate_plan(plan: dict, tiers: dict) -> dict:
         raise ValueError("external routing must be free-only and require free-quota confirmation")
     p["provider_policy"] = merged
     p["guard_tokens"] = int(p.get("guard_tokens") or 100_000)
+    p.setdefault("cheap_overrides", [])
+    if not isinstance(p["cheap_overrides"], list):
+        raise ValueError("'cheap_overrides' must be a list")
+    p["cheap_overrides"] = [str(item).strip() for item in p["cheap_overrides"] if str(item).strip()]
+    rp = p.get("review_policy") or {}
+    if not isinstance(rp, dict):
+        raise ValueError("'review_policy' must be an object")
+    merged_rp = dict(DEFAULT_REVIEW_POLICY)
+    merged_rp.update(rp)
+    merged_rp["max_rounds"] = int(merged_rp.get("max_rounds") or 2)
+    if merged_rp["max_rounds"] < 1:
+        raise ValueError("'review_policy.max_rounds' must be >= 1")
+    if merged_rp.get("when") not in REVIEW_WHEN:
+        raise ValueError("'review_policy.when' must be 'before_push' or 'on_sensitive_change'")
+    sevs = merged_rp.get("blocking_severities") or []
+    if not isinstance(sevs, list) or not sevs or any(str(s).lower() not in REVIEW_SEVERITIES for s in sevs):
+        raise ValueError("'review_policy.blocking_severities' must be critical/high/medium/low")
+    merged_rp["blocking_severities"] = [str(s).lower() for s in sevs]
+    p["review_policy"] = merged_rp
     names = {p["main_name"]}
     out = []
     for s in p["specialists"]:
@@ -311,11 +447,40 @@ def _bullets(items: list[str]) -> str:
 
 
 def _common_constraints(plan: dict) -> list[str]:
-    c = list(plan["rules"])
+    c = [CHEAP_FIRST_RULE] + [r for r in plan["rules"] if r != CHEAP_FIRST_RULE]
     if plan["avoid_files"]:
         c.append("DO NOT open these large files in full; search them for the exact term and read only the "
                  "matching lines: " + ", ".join(f"`{f}`" for f in plan["avoid_files"]) + ".")
     return c
+
+
+def _specialist_when(s: dict, plan: dict) -> str:
+    if s["role"] == "reviewer" and plan["review_policy"]["when"] == "before_push":
+        return ("Immediately before a push or pull request (not mid-task; "
+                f"at most {plan['review_policy']['max_rounds']} rounds; "
+                "only Critical/High findings block)")
+    return s["when"]
+
+
+def _review_policy_md(plan: dict) -> str:
+    if not any(s["role"] == "reviewer" for s in plan["specialists"]):
+        return ""
+    rp = plan["review_policy"]
+    who = next(s["name"] for s in plan["specialists"] if s["role"] == "reviewer")
+    sevs = "/".join(s.title() for s in rp["blocking_severities"])
+    when = ("only immediately before a push or pull request, never mid-task"
+            if rp["when"] == "before_push" else "when the specialist trigger matches")
+    return (f"\n## Review policy\n"
+            f"- Delegate to **{who}** {when}.\n"
+            f"- At most {rp['max_rounds']} review rounds.\n"
+            f"- Only {sevs} findings block the push; log everything else as a follow-up.\n")
+
+
+def _cheap_first_rows(plan: dict) -> list[str]:
+    rows = [f"| {item} | Do it yourself on the cheap model |" for item in plan["cheap_overrides"]]
+    routine = ", ".join(plan["routine"]) or "running tools and tests, small edits, docs, git"
+    rows.append(f"| {routine} | Do it yourself |")
+    return rows
 
 
 def render_main(plan: dict, tiers: dict) -> str:
@@ -323,13 +488,11 @@ def render_main(plan: dict, tiers: dict) -> str:
     specs = plan["specialists"]
     delegable = [s for s in specs if s["role"] != "checker"]
     agents = "[" + ", ".join(f"'{s['name']}'" for s in specs) + "]"
-    rows = []
+    rows = _cheap_first_rows(plan)
     for s in delegable:
         action = f"Run the **two-pass check** below (starts with **{s['name']}**)" if s["double_check"] \
             else f"Delegate to **{s['name']}**"
-        rows.append(f"| {s['when']} | {action} |")
-    routine = ", ".join(plan["routine"]) or "running tools and tests, small edits, docs, git"
-    rows.append(f"| {routine} | Do it yourself |")
+        rows.append(f"| {_specialist_when(s, plan)} | {action} |")
     two_pass = ""
     for s in delegable:
         if not s["double_check"]:
@@ -346,9 +509,12 @@ def render_main(plan: dict, tiers: dict) -> str:
    keep it unconfirmed, record both readings, and ask the user.
 4. Show the user a table: ID | item | first pass | second pass | agreed / needs confirmation.
    Agreement is not confirmation; confirmation stays with the user.
+Skip this two-pass check for cheap-override or routine regeneration unless counts or IDs do not reconcile.
 """
     constraints = _bullets(_common_constraints(plan) + [
-        "Never do a specialist's work yourself, even if it looks easy."])
+        "Match the first applicable routing row; cheap overrides and routine win over specialists.",
+        "Never do a specialist's work yourself unless this request is listed as routine or a cheap override.",
+        LONG_CHAT_RULE])
     tests = f"\nRun tests with `{plan['test_command']}`.\n" if plan["test_command"] else ""
     desc = (f"Main {plan['project']} agent for all work in this project. Does routine work itself on a low-cost "
             f"model and automatically delegates to: " + "; ".join(f"{s['name']} ({s['when']})" for s in delegable) + ".")
@@ -366,10 +532,11 @@ At the start of a new task, read `.github/notes.md` for the short handoff from p
 the task finishes, append 1-3 lines with the decision, current state, half-done work or a gotcha.
 {tests}
 ## Routing (decide before doing anything)
+Match the first applicable row. Cheap overrides and routine stay on this model.
 | The request needs... | Do this |
 |---|---|
 {chr(10).join(rows)}
-{two_pass}
+{_review_policy_md(plan)}{two_pass}
 ## Delegating
 - Give the subagent everything in one message: the goal, files and paths, expected result and
   what to return. It does not see this conversation.
@@ -416,6 +583,11 @@ def render_specialist(s: dict, plan: dict, tiers: dict) -> str:
         intro = f"You review {plan['project']} changes. Mistakes here matter, so be thorough and concrete."
         approach = ["Read the diff (`git --no-pager diff`) and only the code around it.",
                     "For each concern, construct a concrete failure scenario; drop anything you can't make concrete."]
+        rp = plan["review_policy"]
+        sevs = "/".join(s.title() for s in rp["blocking_severities"])
+        extra = ((extra + "\n\n") if extra else "") + (
+            f"Review only immediately before a push or pull request, never mid-task. "
+            f"At most {rp['max_rounds']} rounds. Only {sevs} findings block; log Medium/Low as follow-up.")
         out = "Findings ordered by severity, each with file/line, the concrete scenario and a suggested fix; " \
               "or \"No issues found\"."
     elif role == "extractor":
@@ -465,13 +637,12 @@ data there.
 
 
 def render_claude_main(plan: dict) -> str:
-    rows = []
+    rows = _cheap_first_rows(plan)
     for s in plan["specialists"]:
         if s["role"] == "checker":
             continue
         action = f"invoke `{slug(s['name'])}`" + (" with an independent checker" if s["double_check"] else "")
-        rows.append(f"| {s['when']} | {action} |")
-    rows.append(f"| {', '.join(plan['routine']) or 'Routine work'} | Do it yourself |")
+        rows.append(f"| {_specialist_when(s, plan)} | {action} |")
     return f"""---
 name: spend-guard
 description: {_yaml_str(f"Route {plan['project']} work to the appropriate cost and accuracy tier.")}
@@ -527,23 +698,34 @@ def render_section(plan: dict, tiers: dict) -> str:
              f"New chats here start on a low-cost model (`.vscode/settings.json`). Whichever agent you are, "
              f"route every request yourself; the user does not pick agents. The full routing table is in "
              f"`.github/agents/{slug(plan['main_name'])}.agent.md`:"]
+    lines.append(f"- {CHEAP_FIRST_RULE}")
     lines.append("- At the start of a new task, read `.github/notes.md` for the short handoff from previous chats; "
                  "append 1-3 lines when the task finishes.")
     lines.append("- For compatible external API tools, use only the trusted providers in "
                  "`.github/spend-guard-providers.json`; use one primary and fallback only on failure.")
+    for item in plan["cheap_overrides"]:
+        lines.append(f"- {item}: do it yourself on the cheap model.")
+    lines.append(f"- {', '.join(plan['routine']) or 'Routine work'}: do it yourself.")
     for s in plan["specialists"]:
         if s["role"] == "checker":
             continue
         tail = " (with an independent second pass by the checker; disagreements go to the user)" \
             if s["double_check"] else ""
-        lines.append(f"- {s['when']}: delegate to the `{s['name']}` subagent{tail}.")
-    lines.append(f"- {', '.join(plan['routine']) or 'Routine work'}: do it yourself.")
+        lines.append(f"- {_specialist_when(s, plan)}: delegate to the `{s['name']}` subagent{tail}.")
+    if any(s["role"] == "reviewer" for s in plan["specialists"]):
+        rp = plan["review_policy"]
+        sevs = "/".join(s.title() for s in rp["blocking_severities"])
+        lines.append(f"- Review cap: at most {rp['max_rounds']} rounds; only {sevs} findings block; "
+                     "review only before a push.")
     if plan["avoid_files"]:
         lines.append("- Never open " + ", ".join(f"`{f}`" for f in plan["avoid_files"]) + " in full; search them.")
     lines += ["", "### Long chats",
-              f"`.github/hooks/spend_guard.py` adds a \"[Spend-Guard …]\" note to the message once this chat "
-              f"passes ~{plan['guard_tokens'] // 1000}k tokens of context. Continue follow-ups here; move a new task to "
-              "a fresh chat with a short handoff. Never put secrets or client data in `.github/notes.md`.", SECTION_END]
+              f"`.github/hooks/spend_guard.py` adds a \"[Spend-Guard …]\" note once this chat "
+              f"passes ~{plan['guard_tokens'] // 1000}k tokens. {LONG_CHAT_RULE} "
+              "Never put secrets or client data in `.github/notes.md`.",
+              "", "### Always-loaded instructions",
+              "Files with `applyTo: '**'` and `.github/copilot-instructions.md` are added to every request. "
+              "Keep them short; put long workflows in a skill instead.", SECTION_END]
     return "\n".join(lines) + "\n"
 
 
@@ -573,21 +755,29 @@ GUARD_JSON = """{
 GUARD_PY = '''"""Spend-Guard hook ({mark} {version}): a Copilot userPromptTransformed hook.
 
 Every model call resends the whole chat. When this chat's context passes a threshold, append
-a note asking the agent to move a NEW task to a fresh low-cost chat with a short handoff.
-Follow-ups continue normally. Fails open: on any problem the message is left unchanged.
+a note telling the agent to stop and move to a fresh low-cost chat with a short handoff.
+Do not keep working in a chat that has already crossed the cap.
+
+On the first user prompt of each local day, also compare this tool and the installed skill
+with the latest published Spend-Guard version and, if behind, ask the user to upgrade.
+The user's request still runs. Fails open: on any problem the message is left unchanged.
 """
 
+import datetime as dt
 import json
 import os
+import re
 import sys
+import urllib.request
 from pathlib import Path
 
+HOOK_VERSION = "{version}"
 SOFT_TOKENS = int(os.environ.get("SPEND_GUARD_TOKENS", "{tokens}"))
 MODEL = "{model}"
+LATEST_URL = "{latest_url}"
 
 
-def context_tokens(session_id):
-    home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
+def context_tokens(session_id, home):
     with open(home / "session-state" / session_id / "events.jsonl", "rb") as f:
         f.seek(0, os.SEEK_END)
         f.seek(max(0, f.tell() - 4_000_000))
@@ -603,27 +793,133 @@ def context_tokens(session_id):
     return 0
 
 
+def _version_tuple(version):
+    parts = [int(p) for p in re.split(r"[^\\d]+", str(version or "")) if p.isdigit()]
+    return tuple(parts) if parts else (0,)
+
+
+def _read_version(path):
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")[:8000]
+    except OSError:
+        return ""
+    match = re.search(r'^VERSION\\s*=\\s*"([\\d.]+)"', text, re.M)
+    return match.group(1) if match else ""
+
+
+def _cwd(data, home, sid):
+    value = data.get("cwd") or data.get("workspace") or data.get("workspaceFolder")
+    if isinstance(value, dict):
+        value = value.get("cwd") or value.get("path")
+    if value:
+        return os.path.normcase(os.path.abspath(str(value)))
+    try:
+        for line in (home / "session-state" / sid / "workspace.yaml").read_text(
+                encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("cwd:"):
+                return os.path.normcase(os.path.abspath(line[4:].strip().strip('"')))
+    except OSError:
+        pass
+    return ""
+
+
+def _daily_path(home):
+    return home / "spend-guard" / "daily-update.json"
+
+
+def _load_daily(home):
+    path = _daily_path(home)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return path, data
+    except (OSError, ValueError):
+        pass
+    return path, {{}}
+
+
+def _save_daily(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data) + "\\n", encoding="utf-8")
+
+
+def _remote_version(home, cache, today):
+    pinned = os.environ.get("SPEND_GUARD_LATEST_VERSION", "").strip()
+    if pinned:
+        return pinned
+    if cache.get("date") == today and cache.get("remote_version"):
+        return str(cache.get("remote_version") or "")
+    url = os.environ.get("SPEND_GUARD_LATEST_URL", LATEST_URL).strip()
+    if not url:
+        return ""
+    try:
+        with urllib.request.urlopen(url, timeout=1.5) as resp:
+            text = resp.read(8000).decode("utf-8", "replace")
+        match = re.search(r'^VERSION\\s*=\\s*"([\\d.]+)"', text, re.M)
+        return match.group(1) if match else ""
+    except Exception:
+        return ""
+
+
+def upgrade_note(home, data, sid):
+    if os.environ.get("SPEND_GUARD_SKIP_UPDATE_CHECK"):
+        return ""
+    today = dt.date.today().isoformat()
+    path, cache = _load_daily(home)
+    if cache.get("date") == today and cache.get("prompted"):
+        return ""
+    remote = _remote_version(home, cache, today)
+    skill = _read_version(home / "skills" / "spend-guard" / "spendguard.py") or HOOK_VERSION
+    applied = HOOK_VERSION
+    cwd = _cwd(data, home, sid)
+    if cwd:
+        plan_path = Path(cwd) / ".github" / "spend-guard.json"
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+            applied = str(plan.get("spend_guard_version") or applied)
+        except (OSError, ValueError):
+            pass
+    cache = {{"date": today, "remote_version": remote, "skill_version": skill,
+             "applied_version": applied, "prompted": False}}
+    messages = []
+    if remote and _version_tuple(remote) > _version_tuple(skill):
+        messages.append(
+            f"version {{remote}} is available (installed skill {{skill}}). "
+            "Prompt the user once now: Upgrade Spend-Guard to the latest version?")
+    if _version_tuple(skill) > _version_tuple(applied):
+        messages.append(
+            f"this tool is on Spend-Guard {{applied}}; the installed skill is {{skill}}. "
+            "Prompt the user once to run `spendguard.py update` here.")
+    if not messages:
+        _save_daily(path, cache)
+        return ""
+    cache["prompted"] = True
+    _save_daily(path, cache)
+    return ("\\n\\n[Spend-Guard: " + " ".join(messages) +
+            " Do not upgrade without confirmation. Continue this request either way.]")
+
+
 def main():
     data = json.loads(sys.stdin.buffer.read().decode("utf-8") or "{{}}")
     sid = data.get("sessionId") or data.get("session_id") or ""
     content = data.get("transformedPrompt")
     if not sid or not isinstance(content, str) or not content.strip():
         return "{{}}"
-    tokens = context_tokens(sid)
-    if tokens < SOFT_TOKENS:
+    home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
+    tokens = context_tokens(sid, home)
+    note = upgrade_note(home, data, sid)
+    if tokens >= SOFT_TOKENS:
+        note += (
+            f"\\n\\n[Spend-Guard: this chat is long (~{{tokens // 1000}}k tokens). STOP — do not do the user's "
+            "task here. 1) Append one line to `.github/notes.md` (your words, never the user message, never "
+            "secrets). 2) Call create_session NOW with model "
+            f"\\"{{MODEL}}\\", this workspace, a short title, and prompt = a ≤15-line handoff (goal, key files, "
+            "state) plus the user's request verbatim. 3) Reply with only the new chat link. "
+            "Do not ask the user to start a chat or paste a handoff unless create_session is missing from "
+            "your tools.]"
+        )
+    if not note:
         return "{{}}"
-    note = (
-        f"\\n\\n[Spend-Guard: this chat is long (~{{tokens // 1000}}k tokens of history are resent with every "
-        "request). Decide whether the request above is a NEW task or a follow-up. Follow-up: ignore this note. "
-        "New task: do not start it here. If you have the create_session tool, call it with model "
-        f"\\"{{MODEL}}\\", this workspace, a short title, and a prompt containing a handoff (goal, key files, "
-        "decisions and state that matter, max ~15 lines). Before moving, append a one-line summary of the "
-        "decision, current state or half-done work to `.github/notes.md` (your own words, never the user's "
-        "message verbatim, never secrets or client data). "
-        "Then call create_session with the user's request verbatim; reply in "
-        "one line with the link. Otherwise tell the user in one line to start a new chat and give a 3-line "
-        "handoff to paste.]"
-    )
     return json.dumps({{"modifiedTransformedPrompt": content + note}})
 
 
@@ -818,8 +1114,22 @@ DISPATCH_KEYWORDS = {
 }
 
 
-def _task_kind(task: str) -> str:
+def _is_reconcile_task(text: str) -> bool:
+    return any(marker in text for marker in RECONCILE_MARKERS)
+
+
+def _is_cheap_override_task(text: str, plan: dict) -> bool:
+    """True only when the task matches a project plan cheap_override; no tool-specific keywords."""
+    return any(item in text for item in (o.lower() for o in plan.get("cheap_overrides") or []) if item)
+
+
+def _task_kind(task: str, plan: dict | None = None) -> str:
     text = task.lower()
+    plan = plan or {}
+    if _is_reconcile_task(text):
+        return "accuracy"
+    if _is_cheap_override_task(text, plan):
+        return "routine"
     for kind in ("sensitive", "accuracy", "code"):
         if any(word in text for word in DISPATCH_KEYWORDS[kind]):
             return kind
@@ -829,7 +1139,7 @@ def _task_kind(task: str) -> str:
 def dispatch_task(folder: Path, task: str, free_quota_confirmed: bool = False) -> dict:
     """Return a deterministic route for a compatible client; never invokes a provider."""
     plan = validate_plan(load_plan(folder), load_tiers())
-    kind = _task_kind(task)
+    kind = _task_kind(task, plan)
     tier = {"routine": "cheap", "code": "standard", "accuracy": "accurate", "sensitive": "accurate"}[kind]
     policy = plan["provider_policy"]
     copilot = {"target": "copilot", "tier": tier, "model": load_tiers()[tier]["models"][0],
@@ -935,6 +1245,42 @@ def validate_project(folder: Path, strict: bool = False) -> dict:
                         ", ".join(sensitive_paths[:5]))
     else:
         checks.append("specialist coverage is configured for detected sensitive paths")
+    if any(s["role"] == "reviewer" for s in plan["specialists"]):
+        main_text = (folder / ".github" / "agents" / f"{slug(plan['main_name'])}.agent.md")
+        body = main_text.read_text(encoding="utf-8", errors="replace") if main_text.exists() else ""
+        if "Review policy" in body and "at most" in body.lower():
+            checks.append("review cap is present in the main agent")
+        else:
+            warnings.append("reviewer exists but the main agent is missing the review cap")
+    main_agent = folder / ".github" / "agents" / f"{slug(plan['main_name'])}.agent.md"
+    if CHEAP_FIRST_RULE in (main_agent.read_text(encoding="utf-8", errors="replace") if main_agent.exists() else ""):
+        checks.append("cheap-first rule is present in the main agent")
+    else:
+        warnings.append("main agent is missing the cheap-first rule; run `spendguard.py update`")
+    always_loaded = []
+    copilot_instr = folder / ".github" / "copilot-instructions.md"
+    if copilot_instr.exists():
+        always_loaded.append(copilot_instr)
+    instr_dir = folder / ".github" / "instructions"
+    if instr_dir.exists():
+        for path in instr_dir.glob("*.instructions.md"):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"^applyTo:\s*['\"]?\*\*['\"]?\s*$", text, re.M):
+                always_loaded.append(path)
+    for path in always_loaded:
+        line_count = path.read_text(encoding="utf-8", errors="replace").count("\n") + 1
+        rel = path.relative_to(folder).as_posix()
+        if line_count > ALWAYS_LOADED_WARN_LINES:
+            warnings.append(f"always-loaded instruction file {rel} is {line_count} lines; trim it or narrow "
+                            "applyTo, because it is added to every request")
+        else:
+            checks.append(f"always-loaded instruction file {rel} is {line_count} lines")
+    applied = str(plan.get("spend_guard_version") or "")
+    if _version_tuple(applied) < _version_tuple(VERSION):
+        warnings.append(f"applied Spend-Guard {applied or 'unknown'} is behind {VERSION}; "
+                        "run `spendguard.py update` to get new cost-saving features")
+    else:
+        checks.append(f"applied Spend-Guard version is current ({VERSION})")
     if strict and warnings:
         errors.extend(f"strict: {warning}" for warning in warnings)
     return {"ok": not errors, "strict": strict, "errors": errors, "warnings": warnings,
@@ -1058,11 +1404,116 @@ def render_claude_section(plan: dict) -> str:
              "Read `.github/notes.md` at the start of a new task and append a short durable handoff "
              "when it finishes. Never put secrets or client data in the notes.",
              f"Main routing skill: `.claude/skills/spend-guard/SKILL.md`."]
+    lines.append(f"- {CHEAP_FIRST_RULE}")
+    for item in plan["cheap_overrides"]:
+        lines.append(f"- {item}: stay on the cheap model.")
     for s in plan["specialists"]:
         if s["role"] != "checker":
-            lines.append(f"- {s['when']}: invoke `.claude/skills/{slug(s['name'])}/SKILL.md`.")
+            lines.append(f"- {_specialist_when(s, plan)}: invoke `.claude/skills/{slug(s['name'])}/SKILL.md`.")
     lines += [CLAUDE_SECTION_END]
     return "\n".join(lines) + "\n"
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    parts = [int(p) for p in re.split(r"[^\d]+", str(version or "")) if p.isdigit()]
+    return tuple(parts) if parts else (0,)
+
+
+def _load_projects() -> dict:
+    try:
+        data = json.loads(PROJECTS_FILE.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {"projects": []}
+    if not isinstance(data, dict) or not isinstance(data.get("projects"), list):
+        return {"projects": []}
+    return data
+
+
+def _save_projects(data: dict) -> None:
+    PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PROJECTS_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+
+def _project_key(folder: Path) -> str:
+    return os.path.normcase(str(folder.resolve()))
+
+
+def _register_project(folder: Path, plan: dict) -> None:
+    key = _project_key(folder)
+    data = _load_projects()
+    projects = [p for p in data["projects"] if isinstance(p, dict) and p.get("folder") != key]
+    projects.append({
+        "folder": key,
+        "project": plan.get("project") or Path(folder).name,
+        "spend_guard_version": str(plan.get("spend_guard_version") or VERSION),
+        "updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="minutes"),
+    })
+    data["projects"] = sorted(projects, key=lambda p: p.get("folder") or "")
+    _save_projects(data)
+
+
+def _unregister_project(folder: Path) -> None:
+    key = _project_key(folder)
+    data = _load_projects()
+    kept = [p for p in data["projects"] if isinstance(p, dict) and p.get("folder") != key]
+    if len(kept) != len(data["projects"]):
+        data["projects"] = kept
+        _save_projects(data)
+
+
+def stale_projects(folders: list[Path] | None = None) -> dict:
+    """List applied tools still on an older Spend-Guard version."""
+    current = _version_tuple(VERSION)
+    by_key: dict[str, dict] = {}
+    for entry in _load_projects()["projects"]:
+        if isinstance(entry, dict) and entry.get("folder"):
+            by_key[str(entry["folder"])] = entry
+    for extra in folders or []:
+        extra = extra.resolve()
+        plan_path = extra / PLAN_FILE
+        if not plan_path.is_file():
+            continue
+        key = _project_key(extra)
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            plan = {}
+        by_key.setdefault(key, {
+            "folder": key,
+            "project": plan.get("project") or extra.name,
+            "spend_guard_version": str(plan.get("spend_guard_version") or ""),
+        })
+    projects, outdated = [], []
+    for entry in by_key.values():
+        folder = str(entry.get("folder") or "")
+        applied = str(entry.get("spend_guard_version") or "")
+        status = "current"
+        plan_path = Path(folder) / PLAN_FILE if folder else None
+        if not folder or plan_path is None or not plan_path.is_file():
+            status = "missing"
+        else:
+            try:
+                plan = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+                applied = str(plan.get("spend_guard_version") or applied)
+            except (OSError, ValueError):
+                status = "unreadable"
+        if status == "current" and _version_tuple(applied) < current:
+            status = "outdated"
+        row = {
+            "folder": folder,
+            "project": entry.get("project") or (Path(folder).name if folder else ""),
+            "spend_guard_version": applied or "unknown",
+            "status": status,
+        }
+        projects.append(row)
+        if status != "current":
+            outdated.append(row)
+    prompt = ""
+    if outdated:
+        names = ", ".join(f"{p['project']} ({p['folder']})" for p in outdated)
+        prompt = (f"Spend-Guard {VERSION} has new features. Update these applied tools with "
+                  f"`spendguard.py update <folder>`: {names}")
+    return {"current_version": VERSION, "projects": projects, "outdated": outdated, "prompt": prompt}
 
 
 def apply(folder: Path, plan: dict, dry: bool = False) -> list[str]:
@@ -1084,7 +1535,8 @@ def apply(folder: Path, plan: dict, dry: bool = False) -> list[str]:
             log.append(f"removed {old.as_posix()} (no longer in the plan)")
     hooks = folder / ".github" / "hooks"
     _write_managed(hooks / "spend_guard.py", GUARD_PY.format(
-        mark=MARK, version=VERSION, tokens=plan["guard_tokens"], model=tiers["cheap"]["default_model_id"]), log, dry)
+        mark=MARK, version=VERSION, tokens=plan["guard_tokens"],
+        model=tiers["cheap"]["default_model_id"], latest_url=LATEST_VERSION_URL), log, dry)
     _write_managed(hooks / "session_start.py", SESSION_START_PY, log, dry)
     guard_json = GUARD_JSON.replace('"version": 1,', f'"version": 1,\n  "description": "{MARK}",')
     _write_managed(hooks / "spend-guard.json", guard_json, log, dry)
@@ -1127,6 +1579,7 @@ def apply(folder: Path, plan: dict, dry: bool = False) -> list[str]:
     if not dry:
         (folder / PLAN_FILE).parent.mkdir(parents=True, exist_ok=True)
         (folder / PLAN_FILE).write_text(json.dumps(saved, indent=2) + "\n", encoding="utf-8", newline="\n")
+        _register_project(folder, saved)
     log.append(f"saved the plan to {(folder / PLAN_FILE).as_posix()}")
     return log
 
@@ -1174,6 +1627,8 @@ def remove(folder: Path, dry: bool = False) -> list[str]:
               folder / ".claude" / "skills", folder / ".claude"):
         if d.exists() and not any(d.iterdir()) and not dry:
             d.rmdir()
+    if not dry:
+        _unregister_project(folder)
     _ = plan
     return log
 
@@ -1485,6 +1940,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("analyze", help="facts about a project (JSON)")
     a.add_argument("folder", type=Path)
+    a = sub.add_parser("propose", help="draft a routing plan by scanning the project")
+    a.add_argument("folder", type=Path)
     a = sub.add_parser("apply", help="generate or refresh the setup from a plan")
     a.add_argument("folder", type=Path)
     a.add_argument("--plan", type=Path, required=True)
@@ -1516,10 +1973,14 @@ def main(argv: list[str] | None = None) -> int:
     v = sub.add_parser("validate", help="audit the local Spend-Guard setup without running project code")
     v.add_argument("folder", type=Path)
     v.add_argument("--strict", action="store_true", help="treat warnings as validation errors")
+    st = sub.add_parser("stale", help="list applied projects behind this Spend-Guard version")
+    st.add_argument("folders", nargs="*", type=Path, help="also check these folders even if not registered")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "analyze":
             print(json.dumps(analyze(args.folder), indent=2))
+        elif args.cmd == "propose":
+            print(json.dumps(propose_plan(args.folder), indent=2))
         elif args.cmd == "apply":
             print("\n".join(apply(args.folder, json.loads(args.plan.read_text(encoding="utf-8-sig")), args.dry_run)))
         elif args.cmd == "update":
@@ -1545,6 +2006,8 @@ def main(argv: list[str] | None = None) -> int:
             result = validate_project(args.folder, args.strict)
             print(json.dumps(result, indent=2))
             return 0 if result["ok"] else 1
+        elif args.cmd == "stale":
+            print(json.dumps(stale_projects(args.folders), indent=2))
     except (ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
