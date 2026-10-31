@@ -15,9 +15,9 @@ At ~100k tokens, a new cheap chat starts with a short handoff — you don't past
 ![Tests](https://img.shields.io/badge/tests-38%20passing-2EA44F)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
-<img src="docs/assets/how-it-works.svg" alt="Animated diagram: Spend-Guard routes tests to a cheap model, code to a stronger model, and opens a fresh chat at 100k tokens" width="920">
+<img src="docs/assets/routing-tree.svg" alt="Animated routing tree: a request starts on the cheap main agent, then the matching branch lights — stay, developer, reviewer, extractor plus checker, or a fresh Luna chat at 100k tokens" width="920">
 
-<sub>Open the SVG in a browser if GitHub shows a still frame. It loops: cheap → specialist → new chat.</sub>
+<sub>Open the SVG in a browser if GitHub shows a still frame. It loops: stay → developer → reviewer → extractor → new chat.</sub>
 
 </div>
 
