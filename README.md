@@ -41,6 +41,22 @@ You don't pick models. Open a chat and ask.
 
 In the logs that started this, **81% of a month's spend went to the top model**. Expected variable-cost cut is about **60–85%** (workload-dependent, not a guarantee). Measure with `report`; GitHub billing is authoritative.
 
+### Measured results
+
+Spend-Guard was added to one production project on 27 Oct 2026. Compared with the user's other projects (no Spend-Guard) over the same weeks:
+
+| Week starting | With Spend-Guard: credits/call | Cheap-model share | Without Spend-Guard: credits/call |
+|---|---:|---:|---:|
+| 19 Oct (before) | 21.2 | 0% | 29 |
+| 26 Oct (set up 27 Oct) | 5.3 | 30% | 11 |
+| 2 Nov | **1.8** | **59%** | 6.5 |
+
+- **Cost per call: 21.2 → 1.8 credits (−91%).**
+- **Overall weekly saving: ~92%.** 7,691 calls cost $138; at the old rate they would have cost ~$1,630 (≈$1,500 saved in one week).
+- Projects without Spend-Guard also got cheaper (better manual model choice), but still cost ~3.6× more per call and used the cheap model for only 30% of calls.
+
+Caveats: this is one project and an early window. Total spend rose in the setup week because call volume grew ~9×, so the fair comparison is cost per call, not the weekly total.
+
 ## Model tiers
 
 | Tier | Default models | Used for |
