@@ -32,7 +32,7 @@ import re
 import sys
 from pathlib import Path
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 MARK = "managed by spend-guard"
 LATEST_VERSION_URL = "https://raw.githubusercontent.com/PrashantAHD/spend-guard/main/skill/spend-guard/spendguard.py"
 SECTION_START = "<!-- spend-guard:start -->"
