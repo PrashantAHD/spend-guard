@@ -59,6 +59,9 @@ work locally and returns JSON selecting Copilot or an approved external provider
 An external route requires explicit confirmation that the provider's quota is free; sensitive tasks are
 limited to Anthropic/OpenAI and always retain a Copilot fallback. It makes no model or network calls and
 never reads credentials. The calling client must confirm quota and execute the route.
+Keywords match whole words with simple inflections (so `latest`, `prefix` or `scanner` do not upgrade a
+task), and questions, status checks or re-runs that do not ask for a change or a review stay on the cheap
+tier. `tests/test_spendguard.py` keeps a routing case set that checks both directions.
 
 Run the script as `python "<this skill folder>/spendguard.py" <command>` (on macOS/Linux `python3`).
 

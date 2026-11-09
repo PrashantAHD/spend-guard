@@ -695,14 +695,13 @@ description: {_yaml_str(s['when'])}
 
 def render_section(plan: dict, tiers: dict) -> str:
     lines = [SECTION_START, "## Model routing (Spend-Guard)", "",
-             f"New chats here start on a low-cost model (`.vscode/settings.json`). Whichever agent you are, "
-             f"route every request yourself; the user does not pick agents. The full routing table is in "
-             f"`.github/agents/{slug(plan['main_name'])}.agent.md`:"]
+             f"Whichever agent you are, route every request yourself; the user does not pick agents. "
+             f"Full routing table: `.github/agents/{slug(plan['main_name'])}.agent.md`."]
     lines.append(f"- {CHEAP_FIRST_RULE}")
-    lines.append("- At the start of a new task, read `.github/notes.md` for the short handoff from previous chats; "
-                 "append 1-3 lines when the task finishes.")
-    lines.append("- For compatible external API tools, use only the trusted providers in "
-                 "`.github/spend-guard-providers.json`; use one primary and fallback only on failure.")
+    lines.append("- At the start of a new task, read `.github/notes.md` (handoff from previous chats); append 1-3 "
+                 "lines when it finishes. Never put secrets or client data there.")
+    lines.append("- External API tools: only trusted providers in `.github/spend-guard-providers.json`; "
+                 "one primary, fallback only on failure.")
     for item in plan["cheap_overrides"]:
         lines.append(f"- {item}: do it yourself on the cheap model.")
     lines.append(f"- {', '.join(plan['routine']) or 'Routine work'}: do it yourself.")
@@ -712,20 +711,15 @@ def render_section(plan: dict, tiers: dict) -> str:
         tail = " (with an independent second pass by the checker; disagreements go to the user)" \
             if s["double_check"] else ""
         lines.append(f"- {_specialist_when(s, plan)}: delegate to the `{s['name']}` subagent{tail}.")
-    if any(s["role"] == "reviewer" for s in plan["specialists"]):
+    if any(s["role"] == "reviewer" for s in plan["specialists"]) and plan["review_policy"]["when"] != "before_push":
         rp = plan["review_policy"]
         sevs = "/".join(s.title() for s in rp["blocking_severities"])
-        lines.append(f"- Review cap: at most {rp['max_rounds']} rounds; only {sevs} findings block; "
-                     "review only before a push.")
+        lines.append(f"- Review cap: at most {rp['max_rounds']} rounds; only {sevs} findings block.")
     if plan["avoid_files"]:
-        lines.append("- Never open " + ", ".join(f"`{f}`" for f in plan["avoid_files"]) + " in full; search them.")
-    lines += ["", "### Long chats",
-              f"`.github/hooks/spend_guard.py` adds a \"[Spend-Guard …]\" note once this chat "
-              f"passes ~{plan['guard_tokens'] // 1000}k tokens. {LONG_CHAT_RULE} "
-              "Never put secrets or client data in `.github/notes.md`.",
-              "", "### Always-loaded instructions",
-              "Files with `applyTo: '**'` and `.github/copilot-instructions.md` are added to every request. "
-              "Keep them short; put long workflows in a skill instead.", SECTION_END]
+        lines.append("- Never open " + ", ".join(f"`{f}`" for f in plan["avoid_files"]) + " in full; search instead.")
+    lines.append("- Always-loaded files (`applyTo: '**'`, `.github/copilot-instructions.md`) cost tokens on every "
+                 "request. Keep them short; put long workflows in a skill.")
+    lines += ["", "### Long chats", LONG_CHAT_RULE, SECTION_END]
     return "\n".join(lines) + "\n"
 
 
@@ -1195,9 +1189,26 @@ def _provider_policy_json(policy: dict) -> str:
 DISPATCH_KEYWORDS = {
     "sensitive": ("security", "authentication", "authorization", "permission", "secret", "credential",
                   "password", "token", "signing", "cryptograph", "payment", "billing"),
-    "accuracy": ("invoice", "scan", "ocr", "document", "handwriting", "compliance", "legal", "extract"),
-    "code": ("implement", "feature", "fix", "bug", "refactor", "code", "test", "debug"),
+    "accuracy": ("invoice", "scan", "ocr", "document", "handwrit", "compliance", "legal", "extract"),
+    "code": ("implement", "implementation", "feature", "fix", "bug", "refactor", "code", "test", "debug"),
 }
+# Whole words plus simple inflections, so "latest", "prefix", "scanner" or "codebase" do not upgrade a task.
+DISPATCH_SUFFIX = r"(?:s|es|e?d|[a-z]?ing|[a-z]?ed|ten|ic|y|ies|ions?)?"
+LOOKUP_START = re.compile(r"^\s*(?:what|what's|whats|how|why|where|when|which|who|is|are|does|do|can|show|list|"
+                          r"explain|describe|summari[sz]e|tell|check|status|run|rerun|re-run)\b", re.I)
+LOOKUP_BLOCKERS = ("implement", "add", "fix", "change", "update", "edit", "write", "create", "build", "refactor",
+                   "remove", "delete", "rename", "rotate", "migrate", "deploy", "patch", "upgrade", "debug",
+                   "review", "audit", "secure", "security", "vulnerab", "verify", "validate", "extract", "ocr",
+                   "scan", "reconcil")
+
+
+def _has_word(text: str, words: tuple[str, ...]) -> bool:
+    return re.search(r"\b(?:" + "|".join(map(re.escape, words)) + ")" + DISPATCH_SUFFIX + r"\b", text) is not None
+
+
+def _is_lookup_task(text: str) -> bool:
+    """Questions, status checks and re-running existing scripts that do not ask for a change or a review."""
+    return bool(LOOKUP_START.search(text)) and not _has_word(text, LOOKUP_BLOCKERS)
 
 
 def _is_reconcile_task(text: str) -> bool:
@@ -1214,10 +1225,10 @@ def _task_kind(task: str, plan: dict | None = None) -> str:
     plan = plan or {}
     if _is_reconcile_task(text):
         return "accuracy"
-    if _is_cheap_override_task(text, plan):
+    if _is_cheap_override_task(text, plan) or _is_lookup_task(text):
         return "routine"
     for kind in ("sensitive", "accuracy", "code"):
-        if any(word in text for word in DISPATCH_KEYWORDS[kind]):
+        if _has_word(text, DISPATCH_KEYWORDS[kind]):
             return kind
     return "routine"
 

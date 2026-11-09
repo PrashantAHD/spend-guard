@@ -204,6 +204,55 @@ class ApplyTests(Base):
         self.assertEqual((mismatch["kind"], mismatch["tier"]), ("accuracy", "accurate"))
         self.assertFalse(S._is_cheap_override_task("php2shell daily refresh", PLAN))
 
+    ROUTING_CASES = [
+        # Cheap work must not be upgraded by a keyword hidden inside another word or a plain question.
+        ("what does the login module do?", "routine"),
+        ("how many tokens did I spend this week?", "routine"),
+        ("show the latest git log", "routine"),
+        ("update the README with the prefix option", "routine"),
+        ("explain the codebase layout", "routine"),
+        ("run the existing tests", "routine"),
+        ("give me a cost report for this repo", "routine"),
+        ("check the status of the scanner job", "routine"),
+        ("summarise the documentation folder", "routine"),
+        ("show me the billing api readme", "routine"),
+        ("nightly report refresh", "routine"),
+        ("regenerating reports from saved evidence", "routine"),
+        # Expensive work must stay expensive, including when phrased as a question.
+        ("implement pagination for the orders endpoint", "code"),
+        ("fix the bug in date parsing", "code"),
+        ("write a unit test for the parser", "code"),
+        ("debugging the flaky integration tests", "code"),
+        ("how do I implement retries here?", "code"),
+        ("refactor the payment client", "sensitive"),
+        ("add password reset with signed tokens", "sensitive"),
+        ("review authentication changes before push", "sensitive"),
+        ("check the authorization changes for security issues", "sensitive"),
+        ("run a security review of the login flow", "sensitive"),
+        ("can you fix payment signing?", "sensitive"),
+        ("upgrade the cryptography library", "sensitive"),
+        ("extract totals from scanned invoices", "accuracy"),
+        ("OCR the handwritten form", "accuracy"),
+        ("extraction of totals from documents", "accuracy"),
+        ("invoice counts don't reconcile with the ledger", "accuracy"),
+        ("why do the totals not match? does not match the ledger", "accuracy"),
+    ]
+
+    def test_routing_case_set(self):
+        plan = {**PLAN, "cheap_overrides": ["nightly report refresh"]}
+        wrong = [(task, want, S._task_kind(task, plan)) for task, want in self.ROUTING_CASES
+                 if S._task_kind(task, plan) != want]
+        self.assertEqual(wrong, [])
+
+    def test_always_loaded_routing_section_stays_compact(self):
+        tiers = S.load_tiers()
+        plan = S.validate_plan(PLAN, tiers)
+        section = S.render_section(plan, tiers)
+        self.assertLessEqual(len(section), 1900)
+        self.assertEqual(section.count("at most 2 rounds"), 1)
+        sensitive = S.validate_plan({**PLAN, "review_policy": {"when": "on_sensitive_change"}}, tiers)
+        self.assertIn("Review cap: at most 2 rounds", S.render_section(sensitive, tiers))
+
     def test_validate_warns_on_long_always_loaded_instructions(self):
         S.apply(self.dir, PLAN)
         instr = self.dir / ".github" / "instructions"
