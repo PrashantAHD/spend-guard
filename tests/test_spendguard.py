@@ -214,6 +214,33 @@ class ApplyTests(Base):
         self.assertTrue(any("always-loaded instruction file" in w and "wide.instructions.md" in w
                             for w in result["warnings"]))
 
+    def test_fresh_apply_has_healthy_instructions(self):
+        S.apply(self.dir, {**PLAN, "providers": ["copilot", "claude"]})
+        self.assertEqual(S.instruction_health(self.dir), [])
+        self.assertIn("instruction files are healthy", " ".join(S.validate_project(self.dir)["checks"]))
+
+    def test_validate_warns_on_stale_refs_and_duplicate_sections_without_blocking(self):
+        S.apply(self.dir, PLAN)
+        agents = self.dir / "AGENTS.md"
+        section = re.search(re.escape(S.SECTION_START) + ".*?" + re.escape(S.SECTION_END),
+                            agents.read_text(encoding="utf-8"), re.S).group(0)
+        agents.write_text(agents.read_text(encoding="utf-8") + "\nSee `docs/gone.md` and [x](src/old/).\n"
+                          "Ignore `https://x.io/a.md`, `src/*.py`, `<path>/x.md`.\n\n" + section + "\n",
+                          encoding="utf-8")
+        (self.dir / ".github" / "copilot-instructions.md").write_text(section + "\n", encoding="utf-8")
+        result = S.validate_project(self.dir)
+        text = "\n".join(result["warnings"])
+        self.assertIn("AGENTS.md has 2 duplicate Spend-Guard sections", text)
+        self.assertIn("copilot-instructions.md has a Spend-Guard section that belongs in AGENTS.md", text)
+        self.assertIn("docs/gone.md", text)
+        self.assertIn("src/old/", text)
+        self.assertNotIn("x.io", text)
+        self.assertNotIn("src/*.py", text)
+        self.assertNotIn("<path>", text)
+        self.assertNotIn("health", " ".join(result["errors"]))
+        agents.write_text(agents.read_text(encoding="utf-8").replace(S.SECTION_END, "", 1), encoding="utf-8")
+        self.assertIn("unbalanced Spend-Guard section", "\n".join(S.instruction_health(self.dir)))
+
     def test_cheap_first_rule_is_built_into_every_agent(self):
         S.apply(self.dir, {**PLAN, "providers": ["copilot", "claude"]})
         agents = list((self.dir / ".github" / "agents").glob("*.agent.md"))
@@ -467,6 +494,19 @@ class GuardTests(Base):
         home = Path(self.tmp.name) / "home"
         out = json.loads(self.run_session_start({"sessionId": "current", "cwd": str(self.dir)}, home))
         self.assertIn("Local code graph summary", out["additionalContext"])
+        self.assertLessEqual(len(out["additionalContext"]), 6000)
+
+    def test_session_start_surfaces_one_line_instruction_health_warning(self):
+        S.apply(self.dir, PLAN)
+        home = Path(self.tmp.name) / "home"
+        out = json.loads(self.run_session_start({"sessionId": "current", "cwd": str(self.dir)}, home))
+        self.assertNotIn("instruction health", out["additionalContext"])
+        (self.dir / "AGENTS.md").write_text("Read `docs/missing.md`.\n" * 3 + "x\n" * 7000, encoding="utf-8")
+        (self.dir / ".github" / "copilot-instructions.md").write_text("line\n" * 60, encoding="utf-8")
+        out = json.loads(self.run_session_start({"sessionId": "current", "cwd": str(self.dir)}, home))
+        lines = [l for l in out["additionalContext"].splitlines() if "instruction health warning" in l]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("more)", lines[0])
         self.assertLessEqual(len(out["additionalContext"]), 6000)
 
 

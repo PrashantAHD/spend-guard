@@ -36,7 +36,7 @@ You don't pick models. Open a chat and ask.
 |---|---|
 | One expensive model for tests and architecture | Luna for routine work; Sonnet/Opus only when needed |
 | A 300k-token chat makes “push” as costly as a full task | Cap at ~100k, then a fresh cheap chat with notes |
-| Always-on instruction files tax every turn | `validate` warns when those files get long |
+| Always-on instruction files tax every turn | `validate` (and a one-line `sessionStart` warning) flags long files, references to missing paths, and duplicate Spend-Guard sections |
 | Security review on every tweak | At most 2 rounds, Critical/High only, before a push |
 
 In the logs that started this, **81% of a month's spend went to the top model**. Expected variable-cost cut is about **60–85%** (workload-dependent, not a guarantee). Measure with `report`; GitHub billing is authoritative.

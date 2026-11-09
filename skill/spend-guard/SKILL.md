@@ -31,7 +31,9 @@ untouched.
 
 The generated `sessionStart` hook automatically adds the capped notes and a deterministic digest of the
 most recently modified previous chat in the same workspace to startup context. It reads local session logs
-only, makes no model call, and fails open if the input or logs are unavailable.
+only, makes no model call, and fails open if the input or logs are unavailable. It also runs the same
+local instruction-health check as `validate` and, if anything is wrong, appends a single
+"Spend-Guard instruction health warning" line (warn-only; it never blocks the chat).
 
 The generated `userPromptTransformed` hook, on the first prompt of each local day in an applied
 tool, checks whether a newer Spend-Guard version exists. If it does, it asks the user to upgrade
@@ -191,5 +193,9 @@ cheap-first rule: always prefer the cheapest capable model for simple tasks, and
 subagents for simple delegated work. It needs no plan entry; `validate` warns if the main agent lacks it.
 `review_policy` defaults to at most 2 rounds, only Critical/High findings block, and review only
 immediately before a push. The 100k-token hook tells the agent to stop and start a fresh cheap chat
-instead of continuing past the cap. `validate` warns when always-loaded instruction files
-(`applyTo: '**'` or `.github/copilot-instructions.md`) are longer than 40 lines.
+instead of continuing past the cap. `validate` runs warn-only instruction-health checks on `AGENTS.md`,
+`CLAUDE.md`, `.github/copilot-instructions.md` and `.github/instructions/*.instructions.md`: always-loaded
+files (`applyTo: '**'` or `.github/copilot-instructions.md`) longer than 40 lines, backticked or linked
+relative paths that no longer exist (URLs, globs and placeholders are ignored), and duplicate, unbalanced,
+or misplaced Spend-Guard sections that could give conflicting routing rules. These are warnings only;
+they fail `validate` only with `--strict`.

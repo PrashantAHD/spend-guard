@@ -933,6 +933,81 @@ if __name__ == "__main__":
 '''
 
 
+# Shared, dependency-free instruction-health checker. It is exec'd below for `validate` and embedded
+# verbatim in the generated session_start.py, so both always apply the same warn-only rules.
+INSTRUCTION_HEALTH_PY = r'''
+HEALTH_WARN_LINES = 40
+HEALTH_MAX_BYTES = 200000
+HEALTH_MARKERS = (("<!-- spend-guard:start -->", "<!-- spend-guard:end -->", "AGENTS.md"),
+                  ("<!-- spend-guard:claude:start -->", "<!-- spend-guard:claude:end -->", "CLAUDE.md"))
+HEALTH_OPTIONAL_REFS = {".github/copilot-instructions.md"}
+
+
+def _health_files(root):
+    files = [root / "AGENTS.md", root / "CLAUDE.md", root / ".github" / "copilot-instructions.md"]
+    instr = root / ".github" / "instructions"
+    if instr.is_dir():
+        files.extend(sorted(instr.glob("*.instructions.md"))[:50])
+    return [path for path in files if path.is_file()]
+
+
+def _health_refs(text):
+    import re
+    refs = re.findall(r"`([^`\s]+)`", text) + re.findall(r"\]\(([^)\s#]+)(?:#[^)]*)?\)", text)
+    for ref in refs:
+        ref = ref.strip().rstrip(".,;:")
+        if (not ref or "://" in ref or ref.startswith(("mailto:", "#", "~", "$", "-")) or
+                any(c in ref for c in "*?<>{}[]|=\"'") or ref.startswith("/")):
+            continue
+        if "/" not in ref.rstrip("/") and not ref.endswith(".md"):
+            continue
+        last = ref.rstrip("/").rsplit("/", 1)[-1]
+        if not ref.endswith("/") and "." not in last:
+            continue
+        yield ref
+
+
+def instruction_health(root):
+    """Warn-only lint of instruction files: stale path refs, duplicate sections, oversized always-loaded files."""
+    import re
+    warnings = []
+    for path in _health_files(root):
+        rel = path.relative_to(root).as_posix()
+        try:
+            with open(path, "rb") as handle:
+                text = handle.read(HEALTH_MAX_BYTES).decode("utf-8", "replace")
+        except OSError:
+            continue
+        always = rel == ".github/copilot-instructions.md" or (
+            rel.startswith(".github/instructions/") and
+            re.search(r"^applyTo:\s*['\"]?\*\*['\"]?\s*$", text, re.M))
+        lines = text.count("\n") + 1
+        if always and lines > HEALTH_WARN_LINES:
+            warnings.append(f"always-loaded instruction file {rel} is {lines} lines; trim it or narrow "
+                            "applyTo, because it is added to every request")
+        for start, end, home in HEALTH_MARKERS:
+            starts, ends = text.count(start), text.count(end)
+            if starts > 1:
+                warnings.append(f"{rel} has {starts} duplicate Spend-Guard sections; keep one")
+            if starts != ends:
+                warnings.append(f"{rel} has an unbalanced Spend-Guard section ({starts} start, {ends} end markers)")
+            if starts and rel != home:
+                warnings.append(f"{rel} has a Spend-Guard section that belongs in {home}; remove the copy "
+                                "to avoid conflicting routing rules")
+        missing = []
+        for ref in _health_refs(text):
+            if ref in HEALTH_OPTIONAL_REFS or ref in missing:
+                continue
+            if not (root / ref).exists() and not (path.parent / ref).exists():
+                missing.append(ref)
+        if missing:
+            warnings.append(f"{rel} references missing paths: " + ", ".join(missing[:5]) +
+                            (f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""))
+    return warnings
+'''
+exec(INSTRUCTION_HEALTH_PY)
+
+
 SESSION_START_PY = r'''"""Spend-Guard sessionStart hook (managed by spend-guard): inexpensive deterministic project context."""
 
 import json
@@ -944,6 +1019,7 @@ from pathlib import Path
 MAX_CONTEXT = 6000
 MAX_NOTES_LINES = 60
 MAX_MESSAGE = 700
+#__INSTRUCTION_HEALTH__
 
 
 def _cwd(data):
@@ -1052,14 +1128,24 @@ def main():
             context += "\n\nLocal code graph summary:\n" + graph
         if previous:
             context += "\n\n" + previous
-        return json.dumps({"additionalContext": context[-MAX_CONTEXT:]}) if context.strip() else "{}"
+        try:
+            health = instruction_health(Path(cwd))
+        except Exception:
+            health = []
+        warning = ""
+        if health:
+            more = f" (+{len(health) - 1} more)" if len(health) > 1 else ""
+            warning = (f"\n\nSpend-Guard instruction health warning: {health[0][:300]}{more}; "
+                       "run `spendguard.py validate` for details.")
+        context = context[-(MAX_CONTEXT - len(warning)):] + warning
+        return json.dumps({"additionalContext": context}) if context.strip() else "{}"
     except Exception:
         return "{}"
 
 
 if __name__ == "__main__":
     sys.stdout.write(main())
-'''
+'''.replace("#__INSTRUCTION_HEALTH__", INSTRUCTION_HEALTH_PY)
 
 
 # ---------------------------------------------------------------------------
@@ -1257,24 +1343,11 @@ def validate_project(folder: Path, strict: bool = False) -> dict:
         checks.append("cheap-first rule is present in the main agent")
     else:
         warnings.append("main agent is missing the cheap-first rule; run `spendguard.py update`")
-    always_loaded = []
-    copilot_instr = folder / ".github" / "copilot-instructions.md"
-    if copilot_instr.exists():
-        always_loaded.append(copilot_instr)
-    instr_dir = folder / ".github" / "instructions"
-    if instr_dir.exists():
-        for path in instr_dir.glob("*.instructions.md"):
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if re.search(r"^applyTo:\s*['\"]?\*\*['\"]?\s*$", text, re.M):
-                always_loaded.append(path)
-    for path in always_loaded:
-        line_count = path.read_text(encoding="utf-8", errors="replace").count("\n") + 1
-        rel = path.relative_to(folder).as_posix()
-        if line_count > ALWAYS_LOADED_WARN_LINES:
-            warnings.append(f"always-loaded instruction file {rel} is {line_count} lines; trim it or narrow "
-                            "applyTo, because it is added to every request")
-        else:
-            checks.append(f"always-loaded instruction file {rel} is {line_count} lines")
+    health = instruction_health(folder)
+    if health:
+        warnings.extend(health)
+    else:
+        checks.append("instruction files are healthy (sizes, path references, Spend-Guard sections)")
     applied = str(plan.get("spend_guard_version") or "")
     if _version_tuple(applied) < _version_tuple(VERSION):
         warnings.append(f"applied Spend-Guard {applied or 'unknown'} is behind {VERSION}; "
