@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" role="img" aria-labelledby="title desc">
+  <title id="title">Measured results: credits per AI call</title>
+  <desc id="desc">Grouped bars per week. Week of 19 Oct: 29 without Spend-Guard, 21.2 with (baseline). Week of 26 Oct: 11 without, 5.3 with (52% lower). Week of 2 Nov: 6.5 without, 1.8 with (72% lower). Cost per call fell 91%, weekly saving about 92%, cheap-model usage 59% versus 30%.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="960" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#102A2A"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="with" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#5EEAD4"/>
+      <stop offset="1" stop-color="#0F766E"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="960" height="420" rx="28" fill="url(#bg)"/>
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <text x="48" y="46" fill="#E2E8F0" font-size="22" font-weight="700">Measured results</text>
+    <text x="48" y="72" fill="#94A3B8" font-size="14">Credits per AI call, one production project vs projects without Spend-Guard, same weeks</text>
+
+    <!-- legend -->
+    <rect x="48" y="92" width="14" height="14" rx="3" fill="#475569"/>
+    <text x="70" y="104" fill="#CBD5E1" font-size="13">Without Spend-Guard</text>
+    <rect x="218" y="92" width="14" height="14" rx="3" fill="url(#with)"/>
+    <text x="240" y="104" fill="#CBD5E1" font-size="13">With Spend-Guard</text>
+
+    <!-- grid -->
+    <g stroke="#1E293B" stroke-width="1">
+      <path d="M48 330 H580"/>
+      <path d="M48 261 H580" stroke-dasharray="4 6"/>
+      <path d="M48 192 H580" stroke-dasharray="4 6"/>
+    </g>
+    <text x="580" y="257" text-anchor="end" fill="#475569" font-size="11">10</text>
+    <text x="580" y="188" text-anchor="end" fill="#475569" font-size="11">20</text>
+
+    <!-- week 1: 29 / 21.2 (scale 6.9 px per credit) -->
+    <g transform="translate(70,0)">
+      <rect x="0" y="130" width="56" height="200" rx="6" fill="#475569"/>
+      <rect x="64" y="184" width="56" height="146" rx="6" fill="url(#with)"/>
+      <text x="28" y="122" text-anchor="middle" fill="#CBD5E1" font-size="14" font-weight="700">29</text>
+      <text x="92" y="176" text-anchor="middle" fill="#F0FDFA" font-size="14" font-weight="700">21.2</text>
+      <text x="60" y="352" text-anchor="middle" fill="#CBD5E1" font-size="13">19 Oct</text>
+      <rect x="20" y="364" width="80" height="24" rx="12" fill="#1E293B"/>
+      <text x="60" y="381" text-anchor="middle" fill="#94A3B8" font-size="12">baseline</text>
+    </g>
+
+    <!-- week 2: 11 / 5.3 -->
+    <g transform="translate(250,0)">
+      <rect x="0" y="254" width="56" height="76" rx="6" fill="#475569"/>
+      <rect x="64" y="293" width="56" height="37" rx="6" fill="url(#with)"/>
+      <text x="28" y="246" text-anchor="middle" fill="#CBD5E1" font-size="14" font-weight="700">11</text>
+      <text x="92" y="285" text-anchor="middle" fill="#F0FDFA" font-size="14" font-weight="700">5.3</text>
+      <text x="60" y="352" text-anchor="middle" fill="#CBD5E1" font-size="13">26 Oct (setup)</text>
+      <rect x="15" y="364" width="90" height="24" rx="12" fill="#134E4A"/>
+      <text x="60" y="381" text-anchor="middle" fill="#99F6E4" font-size="12" font-weight="700">52% lower</text>
+    </g>
+
+    <!-- week 3: 6.5 / 1.8 -->
+    <g transform="translate(430,0)">
+      <rect x="0" y="285" width="56" height="45" rx="6" fill="#475569"/>
+      <rect x="64" y="318" width="56" height="12" rx="4" fill="url(#with)">
+        <animate attributeName="opacity" values="1;0.55;1" dur="2.4s" repeatCount="indefinite"/>
+      </rect>
+      <text x="28" y="277" text-anchor="middle" fill="#CBD5E1" font-size="14" font-weight="700">6.5</text>
+      <text x="92" y="310" text-anchor="middle" fill="#5EEAD4" font-size="16" font-weight="700">1.8</text>
+      <text x="60" y="352" text-anchor="middle" fill="#CBD5E1" font-size="13">2 Nov</text>
+      <rect x="0" y="364" width="120" height="24" rx="12" fill="#14532D" stroke="#22C55E"/>
+      <text x="60" y="381" text-anchor="middle" fill="#BBF7D0" font-size="12" font-weight="700">72% lower · 3.6×</text>
+    </g>
+
+    <!-- headline stats -->
+    <g transform="translate(624,92)">
+      <rect width="288" height="88" rx="16" fill="url(#card)" stroke="#22C55E" stroke-width="2"/>
+      <text x="20" y="48" fill="#86EFAC" font-size="34" font-weight="800">−91%</text>
+      <text x="138" y="36" fill="#F8FAFC" font-size="14" font-weight="700">cost per call</text>
+      <text x="138" y="58" fill="#94A3B8" font-size="13">21.2 → 1.8 credits</text>
+    </g>
+    <g transform="translate(624,192)">
+      <rect width="288" height="88" rx="16" fill="url(#card)" stroke="#38BDF8" stroke-width="2"/>
+      <text x="20" y="48" fill="#7DD3FC" font-size="34" font-weight="800">~92%</text>
+      <text x="138" y="36" fill="#F8FAFC" font-size="14" font-weight="700">weekly saving</text>
+      <text x="138" y="58" fill="#94A3B8" font-size="13">$138 vs ~$1,630</text>
+    </g>
+    <g transform="translate(624,292)">
+      <rect width="288" height="96" rx="16" fill="url(#card)" stroke="#F59E0B" stroke-width="2"/>
+      <text x="20" y="30" fill="#F8FAFC" font-size="14" font-weight="700">Cheap-model usage</text>
+      <rect x="20" y="44" width="248" height="14" rx="7" fill="#1E293B"/>
+      <rect x="20" y="44" width="146" height="14" rx="7" fill="#F59E0B"/>
+      <rect x="20" y="66" width="248" height="14" rx="7" fill="#1E293B"/>
+      <rect x="20" y="66" width="74" height="14" rx="7" fill="#475569"/>
+      <text x="174" y="56" fill="#FCD34D" font-size="12" font-weight="700">59% with</text>
+      <text x="102" y="78" fill="#94A3B8" font-size="12">30% without</text>
+    </g>
+  </g>
+</svg>

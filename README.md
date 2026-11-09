@@ -15,6 +15,8 @@ At ~100k tokens, a new cheap chat starts with a short handoff — you don't past
 ![Tests](https://img.shields.io/badge/tests-43%20passing-2EA44F)
 ![License](https://img.shields.io/badge/license-MIT-yellow)
 
+**[Why](#why-it-saves-money) · [Results](#measured-results) · [What's new](#whats-new) · [Best results](#getting-the-best-results) · [Model tiers](#model-tiers) · [Quick start](#quick-start) · [Commands](#commands)**
+
 <img src="docs/assets/routing-tree.svg" alt="Animated routing tree: a request starts on the cheap main agent, then the matching branch lights — stay, developer, reviewer, extractor plus checker, or a fresh Luna chat at 100k tokens" width="920">
 
 <sub>Open the SVG in a browser if GitHub shows a still frame. It loops: stay → developer → reviewer → extractor → new chat.</sub>
@@ -30,9 +32,13 @@ At ~100k tokens, a new cheap chat starts with a short handoff — you don't past
 
 You don't pick models. Open a chat and ask.
 
+<p align="center">
+  <img src="docs/assets/how-it-works.svg" alt="How Spend-Guard routes work: routine work stays on the cheap tier, code goes to standard, security review to accurate, a checker makes a second pass, and chats past 100k tokens start a fresh cheap session" width="920">
+</p>
+
 ## Why it saves money
 
-| Without Spend-Guard | With Spend-Guard |
+| ❌ Without Spend-Guard | ✅ With Spend-Guard |
 |---|---|
 | One expensive model for tests and architecture | Luna for routine work; Sonnet/Opus only when needed |
 | A 300k-token chat makes “push” as costly as a full task | Cap at ~100k, then a fresh cheap chat with notes |
@@ -40,11 +46,19 @@ You don't pick models. Open a chat and ask.
 | A word like “latest” or “codebase” pushes a simple question onto a pricier model | Whole-word routing; questions and status checks stay cheap |
 | Security review on every tweak | At most 2 rounds, Critical/High only, before a push |
 
-In the logs that started this, **81% of a month's spend went to the top model**. Expected variable-cost cut is about **60–85%** (workload-dependent, not a guarantee). Measure with `report`; GitHub billing is authoritative.
+> [!NOTE]
+> In the logs that started this, **81% of a month's spend went to the top model**. Expected variable-cost cut is about **60–85%** (workload-dependent, not a guarantee). Measure with `report`; GitHub billing is authoritative.
 
 ### Measured results
 
 Spend-Guard was added to one production project on 27 Oct 2026 and compared with projects without it over the same weeks (credits per AI call):
+
+<p align="center">
+  <img src="docs/assets/results-chart.svg" alt="Credits per AI call by week: 19 Oct 29 without vs 21.2 with (baseline); 26 Oct 11 vs 5.3 (52% lower); 2 Nov 6.5 vs 1.8 (72% lower). Cost per call down 91%, weekly saving about 92%, cheap-model usage 59% vs 30%" width="920">
+</p>
+
+<details>
+<summary><b>Weekly numbers</b></summary>
 
 | Week starting | Without Spend-Guard | With Spend-Guard | Impact |
 |---|---:|---:|---|
@@ -52,13 +66,21 @@ Spend-Guard was added to one production project on 27 Oct 2026 and compared with
 | 26 Oct (setup on 27 Oct) | 11 | 5.3 | 52% lower |
 | 2 Nov | 6.5 | **1.8** | **72% lower (3.6× cheaper)** |
 
+</details>
+
 - **Cost per call: 21.2 → 1.8 credits (−91%)** on the Spend-Guard project.
 - **Weekly saving: ~92%.** 7,691 calls cost $138 instead of ~$1,630 at the old rate (≈$1,500 saved in one week).
 - **Cheap-model usage: 59%** of calls with Spend-Guard vs 30% without.
 
 ## What's new
 
-**Instruction health checks (warn-only).** `validate` now checks `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md` and `.github/instructions/*.instructions.md` for:
+<p align="center">
+  <img src="docs/assets/whats-new.svg" alt="What's new: warn-only instruction health checks; accurate routing, misrouted tasks 8 of 23 before, 0 of 29 now; AGENTS.md routing section 16% smaller, 2,168 to 1,811 characters" width="920">
+</p>
+
+### 🩺 Instruction health checks (warn-only)
+
+`validate` now checks `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md` and `.github/instructions/*.instructions.md` for:
 
 - **Missing paths.** Backticked or linked file paths that no longer exist. URLs, globs and placeholders like `<path>` are ignored.
 - **Duplicate or conflicting Spend-Guard sections.** A section repeated in one file, start/end markers that don't pair up, or a section copied into the wrong file.
@@ -66,27 +88,36 @@ Spend-Guard was added to one production project on 27 Oct 2026 and compared with
 
 These are warnings; they fail `validate` only with `--strict`. The generated `sessionStart` hook runs the same local check at the start of each chat. If anything is wrong, it adds one line to the startup context: "Spend-Guard instruction health warning: … (+N more)". It makes no model or network calls and never blocks the chat.
 
-**More accurate cheap-first routing.** `dispatch` used to match keywords anywhere inside a word, so "**latest**", "pre**fix**", "**code**base" and "**scan**ner" sent simple tasks to the coding or accuracy tier. In a sample of 23 typical tasks, 8 cheap ones were sent to a more expensive tier. Now:
+### 🎯 More accurate cheap-first routing
+
+`dispatch` used to match keywords anywhere inside a word, so "**latest**", "pre**fix**", "**code**base" and "**scan**ner" sent simple tasks to the coding or accuracy tier. In a sample of 23 typical tasks, 8 cheap ones were sent to a more expensive tier. Now:
 
 - **Whole words only.** Keywords match whole words plus simple endings, so "scanned invoices" still counts as accuracy work but "scanner job" doesn't.
 - **Questions stay cheap.** Questions, status checks and re-runs ("how many tokens did I spend?", "run the existing tests") stay on the cheap tier unless they ask for a change, a review or extraction.
 - **Tested both ways.** A 29-case routing test set checks that cheap tasks aren't upgraded and that code, security and accuracy work isn't downgraded.
 
-**Leaner always-loaded section.** The `AGENTS.md` routing section, sent with every request, is about 16% smaller (2,168 → 1,811 characters for the test project) after removing duplicated review-cap and long-chat text. A test keeps it under budget. The review cap is now stated correctly for projects that review on every sensitive change.
+### ✂️ Leaner always-loaded section
 
-To pick these up, re-run the installer, then run `spendguard.py update <folder>` in each applied project (this regenerates the `sessionStart` hook and the `AGENTS.md` section).
+The `AGENTS.md` routing section, sent with every request, is about 16% smaller (2,168 → 1,811 characters for the test project) after removing duplicated review-cap and long-chat text. A test keeps it under budget. The review cap is now stated correctly for projects that review on every sensitive change.
+
+> [!TIP]
+> To pick these up, re-run the installer, then run `spendguard.py update <folder>` in each applied project (this regenerates the `sessionStart` hook and the `AGENTS.md` section).
 
 ## Getting the best results
 
 Spend-Guard picks the model; these habits make sure the cheaper choice is still the right answer.
 
-### Highest impact
+<p align="center">
+  <img src="docs/assets/best-results.svg" alt="Seven habits. Highest impact: tests are the gate, review risky changes, short and accurate instructions. Medium impact: new chat per task, refresh graph after refactors, clear task descriptions. Low effort: monthly usage report" width="920">
+</p>
+
+### 🟢 Highest impact
 
 1. **Make tests the gate.** Set `test_command` in the plan. The code specialist runs it after every change and, if the same problem survives two attempts, stops and reports that the task needs a stronger model. For small edits the cheap main agent makes itself, ask it to run the tests (and your linter) before it finishes.
 2. **Use the independent review for risky changes.** Authentication, payments, data deletion and database migrations deserve review even when the change looks small. Keep the generated security reviewer in the plan, set `"review_policy": {"when": "on_sensitive_change"}` and give the reviewer a `when` trigger that names those areas (for example "After a change to auth/, payments/ or migrations/"), so it runs on those changes, not only before a push. It is still capped at 2 rounds and only Critical/High findings block. For accuracy-critical reading (invoices, scans, contracts), `"double_check": true` adds an independent second pass.
 3. **Keep project instructions short and accurate.** Run `spendguard.py validate <folder>` regularly; the `sessionStart` hook also warns at the start of each chat. Stale paths, duplicated rules and bloated always-loaded files hurt every model's output and cost tokens on every request.
 
-### Medium impact
+### 🔵 Medium impact
 
 4. **Respect the long-chat guard.** Start a new chat for each new task. Long chats make every model, including premium ones, more likely to mix up context, and they make every turn more expensive.
 5. **Refresh the code graph after big refactors.** Run `spendguard.py graph <folder>` so the startup summary (`.github/spend-guard-graph/GRAPH_REPORT.md`) doesn't point the agent at old structure. If the project's shape changed (new sensitive areas, new test command), run `propose` again and `apply` the revised plan.
@@ -98,7 +129,7 @@ Spend-Guard picks the model; these habits make sure the cheaper choice is still 
    Done when: python -m pytest tests/test_orders.py passes and the old behaviour is unchanged without params.
    ```
 
-### Low effort
+### 🟡 Low effort
 
 7. **Check the usage report monthly.** Run `spendguard.py report --days 30`. If a project keeps landing on premium models for routine work, add a `cheap_overrides` entry for that workflow. If a cheap model keeps failing on one type of task, route that type to a specialist permanently in the plan, then `update`.
 
@@ -106,10 +137,10 @@ Spend-Guard picks the model; these habits make sure the cheaper choice is still 
 
 | Tier | Default models | Used for |
 |---|---|---|
-| cheap | GPT-5.6 Luna, GPT-5.4 nano | tools, tests, small edits, docs, git |
-| standard | Claude Sonnet 5.5, GPT-5.6 Sol, Grok 4.7 | writing and fixing code |
-| accurate | Claude Opus 5.5 | security review, accuracy-critical reading |
-| checker | GPT-6 Astra, Grok 4.7, GPT-5.6 Sol | independent second pass |
+| 🟢 cheap | GPT-5.6 Luna, GPT-5.4 nano | tools, tests, small edits, docs, git |
+| 🔵 standard | Claude Sonnet 5.5, GPT-5.6 Sol, Grok 4.7 | writing and fixing code |
+| 🟠 accurate | Claude Opus 5.5 | security review, accuracy-critical reading |
+| 🟣 checker | GPT-6 Astra, Grok 4.7, GPT-5.6 Sol | independent second pass |
 
 Names change. `spendguard.py tiers --init`, edit `~/.copilot/spend-guard/tiers.json`, then `update` each project.
 
@@ -125,7 +156,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1     # macOS/Linux: ./inst
 
 In the target project, start a **new** chat and type **`/spend-guard`**. Confirm the proposed specialists, then commit the generated files.
 
-Company or client repos: check that policy allows changing how AI tools run. Spend-Guard does not send code anywhere new.
+> [!IMPORTANT]
+> Company or client repos: check that policy allows changing how AI tools run. Spend-Guard does not send code anywhere new.
 
 ## What it writes
 

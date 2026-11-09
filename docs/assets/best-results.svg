@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" role="img" aria-labelledby="title desc">
+  <title id="title">Getting the best results</title>
+  <desc id="desc">Seven habits in three columns. Highest impact: tests are the gate, review risky changes, short and accurate instructions. Medium impact: new chat per task, refresh the graph after refactors, clear task descriptions. Low effort: monthly usage report.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="960" y2="300" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#102A2A"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="960" height="300" rx="28" fill="url(#bg)"/>
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <text x="48" y="46" fill="#E2E8F0" font-size="22" font-weight="700">Getting the best results</text>
+    <text x="48" y="72" fill="#94A3B8" font-size="14">Spend-Guard picks the model; these habits keep the cheaper choice right</text>
+
+    <!-- highest impact -->
+    <g transform="translate(48,92)">
+      <rect width="272" height="180" rx="18" fill="url(#card)" stroke="#22C55E" stroke-width="2"/>
+      <rect x="18" y="16" width="120" height="22" rx="11" fill="#14532D"/>
+      <text x="78" y="32" text-anchor="middle" fill="#86EFAC" font-size="11" font-weight="700">HIGHEST IMPACT</text>
+      <g font-size="14" fill="#F8FAFC">
+        <circle cx="32" cy="70" r="12" fill="#22C55E"/><text x="32" y="75" text-anchor="middle" fill="#0B1220" font-size="13" font-weight="800">1</text>
+        <text x="54" y="75">Tests are the gate</text>
+        <circle cx="32" cy="110" r="12" fill="#22C55E"/><text x="32" y="115" text-anchor="middle" fill="#0B1220" font-size="13" font-weight="800">2</text>
+        <text x="54" y="115">Review risky changes</text>
+        <circle cx="32" cy="150" r="12" fill="#22C55E"/><text x="32" y="155" text-anchor="middle" fill="#0B1220" font-size="13" font-weight="800">3</text>
+        <text x="54" y="155">Short, accurate instructions</text>
+      </g>
+    </g>
+
+    <!-- medium impact -->
+    <g transform="translate(344,92)">
+      <rect width="272" height="180" rx="18" fill="url(#card)" stroke="#38BDF8" stroke-width="2"/>
+      <rect x="18" y="16" width="120" height="22" rx="11" fill="#0C4A6E"/>
+      <text x="78" y="32" text-anchor="middle" fill="#7DD3FC" font-size="11" font-weight="700">MEDIUM IMPACT</text>
+      <g font-size="14" fill="#F8FAFC">
+        <circle cx="32" cy="70" r="12" fill="#38BDF8"/><text x="32" y="75" text-anchor="middle" fill="#0B1220" font-size="13" font-weight="800">4</text>
+        <text x="54" y="75">New chat per task</text>
+        <circle cx="32" cy="110" r="12" fill="#38BDF8"/><text x="32" y="115" text-anchor="middle" fill="#0B1220" font-size="13" font-weight="800">5</text>
+        <text x="54" y="115">Refresh graph after refactors</text>
+        <circle cx="32" cy="150" r="12" fill="#38BDF8"/><text x="32" y="155" text-anchor="middle" fill="#0B1220" font-size="13" font-weight="800">6</text>
+        <text x="54" y="155">Clear task descriptions</text>
+      </g>
+    </g>
+
+    <!-- low effort -->
+    <g transform="translate(640,92)">
+      <rect width="272" height="180" rx="18" fill="url(#card)" stroke="#F59E0B" stroke-width="2"/>
+      <rect x="18" y="16" width="100" height="22" rx="11" fill="#78350F"/>
+      <text x="68" y="32" text-anchor="middle" fill="#FCD34D" font-size="11" font-weight="700">LOW EFFORT</text>
+      <g font-size="14" fill="#F8FAFC">
+        <circle cx="32" cy="70" r="12" fill="#F59E0B"/><text x="32" y="75" text-anchor="middle" fill="#0B1220" font-size="13" font-weight="800">7</text>
+        <text x="54" y="75">Monthly usage report</text>
+      </g>
+      <text x="22" y="112" fill="#94A3B8" font-size="12">premium for routine? add cheap_overrides</text>
+      <text x="22" y="132" fill="#94A3B8" font-size="12">cheap model keeps failing? route it up</text>
+      <rect x="18" y="146" width="236" height="22" rx="11" fill="#1E293B"/>
+      <text x="136" y="162" text-anchor="middle" fill="#CBD5E1" font-size="12" font-family="Consolas, monospace">spendguard.py report --days 30</text>
+    </g>
+  </g>
+</svg>

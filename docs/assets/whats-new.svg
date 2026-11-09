@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 330" role="img" aria-labelledby="title desc">
+  <title id="title">What's new in Spend-Guard</title>
+  <desc id="desc">Three cards. Instruction health: warns about missing paths, duplicate Spend-Guard sections and oversized always-loaded files, also at chat start. Accurate routing: misrouted cheap tasks went from 8 of 23 to 0 of 29 test cases. Leaner always-loaded text: 16 percent smaller, 2,168 to 1,811 characters.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="960" y2="330" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#102A2A"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0F172A"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="960" height="330" rx="28" fill="url(#bg)"/>
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <text x="48" y="46" fill="#E2E8F0" font-size="22" font-weight="700">What's new</text>
+    <text x="48" y="72" fill="#94A3B8" font-size="14">Local, deterministic, no model or network calls</text>
+
+    <!-- card 1: instruction health -->
+    <g transform="translate(48,96)">
+      <rect width="272" height="202" rx="18" fill="url(#card)" stroke="#22C55E" stroke-width="2"/>
+      <circle cx="34" cy="36" r="16" fill="#14532D"/>
+      <path d="M26 36 l6 6 l11 -12" stroke="#86EFAC" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="60" y="32" fill="#86EFAC" font-size="11" font-weight="700">WARN-ONLY</text>
+      <text x="60" y="50" fill="#F8FAFC" font-size="16" font-weight="700">Instruction health</text>
+      <g font-size="14" fill="#CBD5E1">
+        <circle cx="26" cy="85" r="4" fill="#F59E0B"/><text x="40" y="90">Paths that no longer exist</text>
+        <circle cx="26" cy="113" r="4" fill="#F59E0B"/><text x="40" y="118">Duplicate Spend-Guard sections</text>
+        <circle cx="26" cy="141" r="4" fill="#F59E0B"/><text x="40" y="146">Oversized always-loaded files</text>
+      </g>
+      <rect x="18" y="164" width="236" height="24" rx="12" fill="#1E293B"/>
+      <text x="136" y="181" text-anchor="middle" fill="#94A3B8" font-size="12">validate + one line at chat start</text>
+    </g>
+
+    <!-- card 2: routing -->
+    <g transform="translate(344,96)">
+      <rect width="272" height="202" rx="18" fill="url(#card)" stroke="#38BDF8" stroke-width="2"/>
+      <circle cx="34" cy="36" r="16" fill="#0C4A6E"/>
+      <path d="M24 42 h8 l6 -12 h8 M40 30 l6 0 M42 42 h4" stroke="#7DD3FC" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="60" y="32" fill="#7DD3FC" font-size="11" font-weight="700">CHEAP-FIRST</text>
+      <text x="60" y="50" fill="#F8FAFC" font-size="16" font-weight="700">Accurate routing</text>
+      <text x="22" y="92" fill="#94A3B8" font-size="12">misrouted tasks: before → now (test set)</text>
+      <text x="22" y="132" fill="#FCA5A5" font-size="30" font-weight="800">8/23</text>
+      <text x="112" y="128" fill="#64748B" font-size="22">→</text>
+      <text x="146" y="132" fill="#86EFAC" font-size="30" font-weight="800">0/29
+        <animate attributeName="opacity" values="1;0.6;1" dur="2.4s" repeatCount="indefinite"/>
+      </text>
+      <rect x="18" y="164" width="236" height="24" rx="12" fill="#1E293B"/>
+      <text x="136" y="181" text-anchor="middle" fill="#94A3B8" font-size="12">whole words · questions stay cheap</text>
+    </g>
+
+    <!-- card 3: leaner section -->
+    <g transform="translate(640,96)">
+      <rect width="272" height="202" rx="18" fill="url(#card)" stroke="#F59E0B" stroke-width="2"/>
+      <circle cx="34" cy="36" r="16" fill="#78350F"/>
+      <path d="M26 30 h16 M26 36 h12 M26 42 h8" stroke="#FCD34D" stroke-width="3" fill="none" stroke-linecap="round"/>
+      <text x="60" y="32" fill="#FCD34D" font-size="11" font-weight="700">EVERY REQUEST</text>
+      <text x="60" y="50" fill="#F8FAFC" font-size="16" font-weight="700">Leaner AGENTS.md</text>
+      <text x="22" y="98" fill="#FCD34D" font-size="30" font-weight="800">−16%</text>
+      <text x="122" y="93" fill="#94A3B8" font-size="12">routing section (chars)</text>
+      <g font-size="12" fill="#94A3B8">
+        <rect x="22" y="116" width="160" height="12" rx="6" fill="#475569"/>
+        <text x="194" y="127">2,168 before</text>
+        <rect x="22" y="138" width="134" height="12" rx="6" fill="#F59E0B"/>
+        <text x="194" y="149" fill="#FCD34D" font-weight="700">1,811 now</text>
+      </g>
+      <rect x="18" y="164" width="236" height="24" rx="12" fill="#1E293B"/>
+      <text x="136" y="181" text-anchor="middle" fill="#94A3B8" font-size="12">no duplicated rules · size-budget test</text>
+    </g>
+  </g>
+</svg>
