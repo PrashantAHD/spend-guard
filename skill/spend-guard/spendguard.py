@@ -1,4 +1,4 @@
-"""Spend-Guard: keeps coding-agent AI spend down by giving every task the right model for the job.
+﻿"""Spend-Guard: keeps coding-agent AI spend down by giving every task the right model for the job.
 
 Sets up a project so routine work runs on a low-cost model and only the work that needs it
 (writing code, security reviews, accuracy-critical reading) goes to stronger models, and keeps
@@ -94,13 +94,19 @@ ALWAYS_LOADED_WARN_LINES = 40
 CHEAP_FIRST_RULE = ("Always prefer the cheapest capable model: keep simple tasks (questions, status checks, "
                     "lookups, cost reports, small edits, docs, git, running existing scripts) on the cheap tier, "
                     "and use lightweight subagents rather than premium ones for simple delegated work.")
+SLOW_MODEL_SECONDS = 45
+# Expected cheap-model seconds per task kind until local history (median of recent tasks) replaces them.
+TASK_BUDGET_DEFAULTS = {"routine": 60, "code": 240, "accuracy": 240, "sensitive": 240}
+TASK_BUDGET_FACTOR = 2.0
+SLOW_MODEL_RULE = ("If the cheap model is very slow or over its time budget (a [Spend-Guard] slow-model or "
+                   "over-budget note appears, or it stalls or keeps retrying), step up one tier only: hand the "
+                   "rest of the request, with what is already done, to a standard-tier subagent. Never jump to "
+                   "the accurate tier just for speed; return to the cheap model for the next task.")
 LONG_CHAT_RULE = ("When a [Spend-Guard] long-chat note appears, stop this chat: append one line to "
                   "`.github/notes.md`, then call `create_session` (cheap default model, this workspace, "
-                  "short title, prompt = ≤15-line handoff + the user's request). Reply with the new chat "
+                  "short title, prompt = â‰¤15-line handoff + the user's request). Reply with the new chat "
                   "link only. Do not ask the user to start a chat or paste a handoff unless `create_session` "
                   "is missing from your tools.")
-RECONCILE_MARKERS = ("reconcil", "do not match", "don't match", "does not match",
-                     "count mismatch", "counts don't", "counts do not")
 CHEAP_WORKFLOW = re.compile(r"(refresh|report|collect|generat|dashboard|inventory|snapshot|daily)", re.I)
 ACCURACY_WORKFLOW = re.compile(r"(extract|ocr|scan|invoice|handwrit|reconcil|evidence)", re.I)
 NOT_CHEAP_WORKFLOW = re.compile(r"(review|security|auth)", re.I)
@@ -438,6 +444,14 @@ def _models(tier: dict) -> str:
     return "[" + ", ".join(f"'{m}'" for m in tier["models"]) + "]"
 
 
+def _model_ids(tier: dict) -> list[str]:
+    """Usage-log ids for a tier, e.g. 'GPT-5.4 nano (copilot)' -> 'gpt-5.4-nano'."""
+    ids = [re.sub(r"\s*\([^)]*\)\s*$", "", m).strip().lower().replace(" ", "-") for m in tier["models"]]
+    if tier.get("default_model_id"):
+        ids.insert(0, tier["default_model_id"].lower())
+    return sorted(set(ids))
+
+
 def _yaml_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -514,7 +528,7 @@ Skip this two-pass check for cheap-override or routine regeneration unless count
     constraints = _bullets(_common_constraints(plan) + [
         "Match the first applicable routing row; cheap overrides and routine win over specialists.",
         "Never do a specialist's work yourself unless this request is listed as routine or a cheap override.",
-        LONG_CHAT_RULE])
+        SLOW_MODEL_RULE, LONG_CHAT_RULE])
     tests = f"\nRun tests with `{plan['test_command']}`.\n" if plan["test_command"] else ""
     desc = (f"Main {plan['project']} agent for all work in this project. Does routine work itself on a low-cost "
             f"model and automatically delegates to: " + "; ".join(f"{s['name']} ({s['when']})" for s in delegable) + ".")
@@ -661,7 +675,8 @@ client data in the notes.
 {chr(10).join(rows)}
 
 ## Constraints
-{_bullets(_common_constraints(plan) + ["Do not read a specialist's results and redo its work yourself."])}
+{_bullets(_common_constraints(plan) + ["Do not read a specialist's results and redo its work yourself.",
+                                       SLOW_MODEL_RULE])}
 """
 
 
@@ -741,12 +756,28 @@ GUARD_JSON = """{
         "bash": "python3 .github/hooks/spend_guard.py",
         "timeoutSec": 10
       }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "powershell": "python .github/hooks/spend_guard.py tool",
+        "bash": "python3 .github/hooks/spend_guard.py tool",
+        "timeoutSec": 5
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "powershell": "python .github/hooks/spend_guard.py stop",
+        "bash": "python3 .github/hooks/spend_guard.py stop",
+        "timeoutSec": 5
+      }
     ]
   }
 }
 """
 
-GUARD_PY = '''"""Spend-Guard hook ({mark} {version}): a Copilot userPromptTransformed hook.
+GUARD_PY = '''"""Spend-Guard hook ({mark} {version}): Copilot userPromptTransformed, postToolUse and agentStop hook.
 
 Every model call resends the whole chat. When this chat's context passes a threshold, append
 a note telling the agent to stop and move to a fresh low-cost chat with a short handoff.
@@ -754,6 +785,15 @@ Do not keep working in a chat that has already crossed the cap.
 
 On the first user prompt of each local day, also compare this tool and the installed skill
 with the latest published Spend-Guard version and, if behind, ask the user to upgrade.
+
+Speed: when a prompt arrives, the task is classified (same classifier as `dispatch`) and given a
+budget of cheap-model seconds: the median of recent completed tasks of that kind (defaults until
+there are enough), times SPEND_GUARD_BUDGET_FACTOR (0 disables). After each tool call, if the
+cheap model has used more than that budget on this task, the agent is told once to step up one
+tier and hand the rest to the standard model. If the cheap model's recent calls in this chat are
+already very slow (median at or above SPEND_GUARD_SLOW_SECONDS; 0 disables), the step-up is
+suggested up front. Never to the accurate tier. Completed tasks that stayed within budget feed
+the history, so expectations track how fast this machine and model really are.
 The user's request still runs. Fails open: on any problem the message is left unchanged.
 """
 
@@ -761,30 +801,159 @@ import datetime as dt
 import json
 import os
 import re
+import statistics
 import sys
-import urllib.request
+import time
 from pathlib import Path
 
 HOOK_VERSION = "{version}"
 SOFT_TOKENS = int(os.environ.get("SPEND_GUARD_TOKENS", "{tokens}"))
+SLOW_SECONDS = float(os.environ.get("SPEND_GUARD_SLOW_SECONDS", "{slow_seconds}"))
+SLOW_SAMPLES = 5
+SLOW_MIN_SAMPLES = 3
+BUDGET_FACTOR = float(os.environ.get("SPEND_GUARD_BUDGET_FACTOR", "{budget_factor}"))
+BUDGET_DEFAULTS = {budget_defaults}
+BUDGET_MIN_SAMPLES = 5
+BUDGET_HISTORY = 30
+BUDGET_FLOOR = 30
 MODEL = "{model}"
+CHEAP_MODELS = {cheap_models}
+STEP_UP_MODEL = "{step_up_model}"
 LATEST_URL = "{latest_url}"
+#__TASK_KIND__
 
 
-def context_tokens(session_id, home):
+def _events_tail(session_id, home):
     with open(home / "session-state" / session_id / "events.jsonl", "rb") as f:
         f.seek(0, os.SEEK_END)
         f.seek(max(0, f.tell() - 4_000_000))
-        lines = f.read().split(b"\\n")
-    for raw in reversed(lines):
-        if b'"session.usage_record"' in raw[:80]:
+        return f.read().split(b"\\n")
+
+
+def _usage_records(session_id, home, this_task=False):
+    """Main-agent usage records, newest first; with this_task, only those after the last user message."""
+    for raw in reversed(_events_tail(session_id, home)):
+        head = raw[:80]
+        if this_task and b'"user.message"' in head:
+            return
+        if b'"session.usage_record"' in head:
             try:
                 usage = json.loads(raw)["data"]["usage"]
             except (ValueError, KeyError):
                 continue
-            if usage.get("initiator") != "sub-agent":
-                return int(usage.get("inputTokens") or 0)
-    return 0
+            if isinstance(usage, dict) and usage.get("initiator") != "sub-agent":
+                yield usage
+
+
+def _is_cheap(usage):
+    return str(usage.get("model") or "").lower() in CHEAP_MODELS
+
+
+def _seconds(usage):
+    try:
+        return max(0.0, float(usage.get("duration") or 0) / 1000)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def context_tokens(records):
+    return int(records[0].get("inputTokens") or 0) if records else 0
+
+
+def slow_note(records):
+    if SLOW_SECONDS <= 0:
+        return ""
+    durations = [_seconds(u) for u in records if _is_cheap(u)][:SLOW_SAMPLES]
+    if len(durations) < SLOW_MIN_SAMPLES:
+        return ""
+    median = statistics.median(durations)
+    if median < SLOW_SECONDS:
+        return ""
+    return (f"\\n\\n[Spend-Guard: the cheap model is slow in this chat (median ~{{median:.0f}}s per call). "
+            f"Step up one tier for this request: hand it to a standard-tier subagent ({{STEP_UP_MODEL}}), "
+            "e.g. the developer specialist. Do not use the accurate tier just for speed. If it stays slow, "
+            f"tell the user once they can pick {{STEP_UP_MODEL}} in the model picker for this chat.]")
+
+
+def _state_dir(home):
+    return home / "spend-guard"
+
+
+def _task_path(home, sid):
+    return _state_dir(home) / "tasks" / (re.sub(r"[^A-Za-z0-9_-]", "_", sid)[:100] + ".json")
+
+
+def _load_json(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        return data if isinstance(data, dict) else {{}}
+    except (OSError, ValueError):
+        return {{}}
+
+
+def _save_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data) + "\\n", encoding="utf-8")
+
+
+def expected_seconds(home, kind):
+    """Pre-calculated cheap-model seconds a task of this kind should take on this machine."""
+    samples = [float(s) for s in _load_json(_state_dir(home) / "task-times.json").get(kind) or []
+               if isinstance(s, (int, float)) and s > 0]
+    if len(samples) >= BUDGET_MIN_SAMPLES:
+        return statistics.median(samples[-BUDGET_HISTORY:])
+    return float(BUDGET_DEFAULTS.get(kind, BUDGET_DEFAULTS["routine"]))
+
+
+def start_task(home, sid, prompt, cwd):
+    plan = _load_json(Path(cwd) / ".github" / "spend-guard.json") if cwd else {{}}
+    kind = _task_kind(prompt, plan)
+    expected = expected_seconds(home, kind)
+    _save_json(_task_path(home, sid), {{"start": time.time(), "kind": kind, "expected": expected,
+                                        "budget": max(BUDGET_FLOOR, expected * BUDGET_FACTOR),
+                                        "nudged": False, "recorded": False}})
+
+
+def budget_note(home, sid):
+    """Mid-task check after a tool call: step up once if the cheap model has blown this task's budget."""
+    if BUDGET_FACTOR <= 0:
+        return ""
+    path = _task_path(home, sid)
+    task = _load_json(path)
+    if not task or task.get("nudged") or time.time() - float(task.get("start") or 0) < task["budget"]:
+        return ""
+    records = list(_usage_records(sid, home, this_task=True))
+    if not records or not _is_cheap(records[0]):
+        return ""
+    spent = sum(_seconds(u) for u in records if _is_cheap(u))
+    if spent < task["budget"]:
+        return ""
+    task["nudged"] = True
+    _save_json(path, task)
+    return (f"[Spend-Guard: this {{task['kind']}} task has used ~{{spent:.0f}}s of cheap-model time; similar tasks "
+            f"take ~{{task['expected']:.0f}}s. The cheap model is not keeping up. Step up one tier now: hand the "
+            f"rest of this request, with what is already done, to a standard-tier subagent ({{STEP_UP_MODEL}}), "
+            "e.g. the developer specialist. Do not use the accurate tier just for speed.]")
+
+
+def record_task(home, sid):
+    """On agentStop, add this task's cheap-model seconds to the history if it stayed within budget."""
+    path = _task_path(home, sid)
+    task = _load_json(path)
+    if not task or task.get("recorded"):
+        return
+    task["recorded"] = True
+    _save_json(path, task)
+    if task.get("nudged"):
+        return
+    spent = sum(_seconds(u) for u in _usage_records(sid, home, this_task=True) if _is_cheap(u))
+    if spent <= 0:
+        return
+    hist_path = _state_dir(home) / "task-times.json"
+    hist = _load_json(hist_path)
+    samples = [s for s in hist.get(task["kind"]) or [] if isinstance(s, (int, float))]
+    hist[task["kind"]] = (samples + [round(spent, 1)])[-BUDGET_HISTORY:]
+    _save_json(hist_path, hist)
 
 
 def _version_tuple(version):
@@ -847,6 +1016,7 @@ def _remote_version(home, cache, today):
     if not url:
         return ""
     try:
+        import urllib.request
         with urllib.request.urlopen(url, timeout=1.5) as resp:
             text = resp.read(8000).decode("utf-8", "replace")
         match = re.search(r'^VERSION\\s*=\\s*"([\\d.]+)"', text, re.M)
@@ -893,21 +1063,43 @@ def upgrade_note(home, data, sid):
             " Do not upgrade without confirmation. Continue this request either way.]")
 
 
-def main():
+def main(mode=""):
     data = json.loads(sys.stdin.buffer.read().decode("utf-8") or "{{}}")
     sid = data.get("sessionId") or data.get("session_id") or ""
-    content = data.get("transformedPrompt")
-    if not sid or not isinstance(content, str) or not content.strip():
+    if not sid:
         return "{{}}"
     home = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
-    tokens = context_tokens(sid, home)
+    if mode == "tool":
+        note = budget_note(home, sid)
+        return json.dumps({{"additionalContext": note}}) if note else "{{}}"
+    if mode == "stop":
+        record_task(home, sid)
+        return "{{}}"
+    content = data.get("transformedPrompt")
+    if not isinstance(content, str) or not content.strip():
+        return "{{}}"
+    try:
+        start_task(home, sid, str(data.get("prompt") or content), _cwd(data, home, sid))
+    except Exception:
+        pass
+    records = []
+    try:
+        for usage in _usage_records(sid, home):
+            records.append(usage)
+            if len(records) >= 50:
+                break
+    except OSError:
+        pass
+    tokens = context_tokens(records)
     note = upgrade_note(home, data, sid)
+    if tokens < SOFT_TOKENS:
+        note += slow_note(records)
     if tokens >= SOFT_TOKENS:
         note += (
-            f"\\n\\n[Spend-Guard: this chat is long (~{{tokens // 1000}}k tokens). STOP — do not do the user's "
+            f"\\n\\n[Spend-Guard: this chat is long (~{{tokens // 1000}}k tokens). STOP â€” do not do the user's "
             "task here. 1) Append one line to `.github/notes.md` (your words, never the user message, never "
             "secrets). 2) Call create_session NOW with model "
-            f"\\"{{MODEL}}\\", this workspace, a short title, and prompt = a ≤15-line handoff (goal, key files, "
+            f"\\"{{MODEL}}\\", this workspace, a short title, and prompt = a â‰¤15-line handoff (goal, key files, "
             "state) plus the user's request verbatim. 3) Reply with only the new chat link. "
             "Do not ask the user to start a chat or paste a handoff unless create_session is missing from "
             "your tools.]"
@@ -919,7 +1111,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        out = main()
+        out = main(sys.argv[1] if len(sys.argv) > 1 else "")
     except Exception:
         out = "{{}}"
     sys.stdout.write(out)
@@ -1186,6 +1378,11 @@ def _provider_policy_json(policy: dict) -> str:
     }, indent=2) + "\n"
 
 
+# Shared, dependency-free task classifier. It is exec'd below for `dispatch` and embedded verbatim in the
+# generated spend_guard.py hook, so the routing tier and the task time budget always agree.
+TASK_KIND_PY = r'''
+RECONCILE_MARKERS = ("reconcil", "do not match", "don't match", "does not match",
+                     "count mismatch", "counts don't", "counts do not")
 DISPATCH_KEYWORDS = {
     "sensitive": ("security", "authentication", "authorization", "permission", "secret", "credential",
                   "password", "token", "signing", "cryptograph", "payment", "billing"),
@@ -1202,25 +1399,25 @@ LOOKUP_BLOCKERS = ("implement", "add", "fix", "change", "update", "edit", "write
                    "scan", "reconcil")
 
 
-def _has_word(text: str, words: tuple[str, ...]) -> bool:
+def _has_word(text, words):
     return re.search(r"\b(?:" + "|".join(map(re.escape, words)) + ")" + DISPATCH_SUFFIX + r"\b", text) is not None
 
 
-def _is_lookup_task(text: str) -> bool:
+def _is_lookup_task(text):
     """Questions, status checks and re-running existing scripts that do not ask for a change or a review."""
     return bool(LOOKUP_START.search(text)) and not _has_word(text, LOOKUP_BLOCKERS)
 
 
-def _is_reconcile_task(text: str) -> bool:
+def _is_reconcile_task(text):
     return any(marker in text for marker in RECONCILE_MARKERS)
 
 
-def _is_cheap_override_task(text: str, plan: dict) -> bool:
+def _is_cheap_override_task(text, plan):
     """True only when the task matches a project plan cheap_override; no tool-specific keywords."""
     return any(item in text for item in (o.lower() for o in plan.get("cheap_overrides") or []) if item)
 
 
-def _task_kind(task: str, plan: dict | None = None) -> str:
+def _task_kind(task, plan=None):
     text = task.lower()
     plan = plan or {}
     if _is_reconcile_task(text):
@@ -1231,6 +1428,8 @@ def _task_kind(task: str, plan: dict | None = None) -> str:
         if _has_word(text, DISPATCH_KEYWORDS[kind]):
             return kind
     return "routine"
+'''
+exec(TASK_KIND_PY)
 
 
 def dispatch_task(folder: Path, task: str, free_quota_confirmed: bool = False) -> dict:
@@ -1619,8 +1818,11 @@ def apply(folder: Path, plan: dict, dry: bool = False) -> list[str]:
             log.append(f"removed {old.as_posix()} (no longer in the plan)")
     hooks = folder / ".github" / "hooks"
     _write_managed(hooks / "spend_guard.py", GUARD_PY.format(
-        mark=MARK, version=VERSION, tokens=plan["guard_tokens"],
-        model=tiers["cheap"]["default_model_id"], latest_url=LATEST_VERSION_URL), log, dry)
+        mark=MARK, version=VERSION, tokens=plan["guard_tokens"], slow_seconds=SLOW_MODEL_SECONDS,
+        budget_factor=TASK_BUDGET_FACTOR, budget_defaults=repr(TASK_BUDGET_DEFAULTS),
+        model=tiers["cheap"]["default_model_id"], cheap_models=repr(_model_ids(tiers["cheap"])),
+        step_up_model=tiers["standard"]["models"][0], latest_url=LATEST_VERSION_URL
+    ).replace("#__TASK_KIND__", TASK_KIND_PY), log, dry)
     _write_managed(hooks / "session_start.py", SESSION_START_PY, log, dry)
     guard_json = GUARD_JSON.replace('"version": 1,', f'"version": 1,\n  "description": "{MARK}",')
     _write_managed(hooks / "spend-guard.json", guard_json, log, dry)

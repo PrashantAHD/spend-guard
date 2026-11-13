@@ -39,6 +39,18 @@ The generated `userPromptTransformed` hook, on the first prompt of each local da
 tool, checks whether a newer Spend-Guard version exists. If it does, it asks the user to upgrade
 and still continues the user's request. Later prompts that day stay quiet. The check fails open.
 
+The same hook also checks speed. When a prompt arrives it classifies the task with the same classifier as
+`dispatch` (routine, code, accuracy, sensitive) and works out how long it should take: the median
+cheap-model seconds of the last 30 completed tasks of that kind on this machine (60s for routine, 240s
+otherwise until 5 tasks exist). The budget is twice that. A `postToolUse` hook checks the budget after each
+tool call. If the cheap model is still running the task and has used more model time than the budget, it
+tells the agent once to step up one tier and hand the rest of the task to a standard-tier subagent. An
+`agentStop` hook adds tasks that stayed within budget to the history, so expectations follow real
+speed. Separately, if the cheap model's last 5 calls in a chat already have a median of 45s or more, the
+step-up is suggested before the task starts. It never moves to the accurate tier just for speed.
+`SPEND_GUARD_BUDGET_FACTOR` (default 2, `0` disables) and `SPEND_GUARD_SLOW_SECONDS` (default 45, `0`
+disables) tune it. State lives in `~/.copilot/spend-guard/`; it makes no model or network call.
+
 An optional `spendguard.py graph <folder>` command builds a local deterministic code graph from supported
 source files using the Python standard library. It records only relative paths, symbol names, imports and
 SHA-256 fingerprints; it excludes secret-looking files, symlinks, dependency/build directories and files

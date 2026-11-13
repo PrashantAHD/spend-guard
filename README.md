@@ -26,7 +26,7 @@ At ~100k tokens, a new cheap chat starts with a short handoff — you don't past
 ## The idea in four beats
 
 1. **Scan the tool** on first setup. Routing is drafted from *that* project's skills, tests and sensitive paths — not a hardcoded workflow from another product.
-2. **Stay cheap** for tests, docs, git, reports and small edits. Hand off code, security review and accuracy-critical reading.
+2. **Stay cheap** for tests, docs, git, reports and small edits. Hand off code, security review and accuracy-critical reading. If the cheap model goes over a task's expected time, step up one tier (standard), never straight to the top model.
 3. **Cut the chat** at ~100k tokens. The agent writes one `notes.md` line and calls `create_session` on Luna. Paste is only a fallback if that tool is missing.
 4. **Stay current.** First prompt of the day in an applied tool checks for a newer Spend-Guard and asks to upgrade.
 
@@ -197,6 +197,7 @@ Plan schema: [SKILL.md](skill/spend-guard/SKILL.md#plan-schema).
 
 - **The 100k hook is advice to the agent**, not a hard lock. In Agent sessions it should call `create_session`. In plain Copilot Chat it may still ask you to paste.
 - **Upgrade check** on the first prompt of the day may fetch the published version once; it fails open and stays quiet the rest of the day.
+- **Time budget per task** uses only local session logs. Each task gets an expected cheap-model time based on how long recent tasks of the same kind took. If the cheap model goes over twice that during the task, the agent hands the rest to a standard-tier subagent. If recent calls already have a median of 45s or more, it steps up before starting. Tune with `SPEND_GUARD_BUDGET_FACTOR` / `SPEND_GUARD_SLOW_SECONDS` (`0` turns either off).
 - **No secrets in `notes.md`.** Graph and memory search skip `.env`, keys and credential-like values.
 - **External providers** are opt-in, `free_only`, and never replace Copilot's own endpoint.
 - Spend-Guard does not cut the Copilot subscription price, guarantee identical model output, or replace tests and human review.

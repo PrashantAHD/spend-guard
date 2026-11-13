@@ -482,6 +482,108 @@ class GuardTests(Base):
         self.assertIn("never the user message", out["modifiedTransformedPrompt"])
         self.assertEqual(notes.read_text(encoding="utf-8"), before)
 
+    def test_guard_steps_up_one_tier_when_cheap_model_is_slow(self):
+        S.apply(self.dir, PLAN)
+        home = Path(self.tmp.name) / "home"
+        d = home / "session-state" / "s1"
+        d.mkdir(parents=True)
+        hook = str(self.dir / ".github" / "hooks" / "spend_guard.py")
+        env = dict(os.environ, COPILOT_HOME=str(home), SPEND_GUARD_SKIP_UPDATE_CHECK="1")
+
+        def run(calls, extra_env=None):
+            recs = [{"type": "session.usage_record", "data": {"usage": {
+                "model": model, "duration": secs * 1000, "inputTokens": 5_000, "initiator": init}}}
+                for model, secs, init in calls]
+            (d / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+            out = subprocess.run([sys.executable, hook], input=json.dumps(
+                {"sessionId": "s1", "transformedPrompt": "do it"}).encode(),
+                capture_output=True, env={**env, **(extra_env or {})}, timeout=20)
+            return out.stdout.decode()
+
+        slow = [("gpt-5.6-luna", 90, "agent")] * 4
+        out = json.loads(run(slow))["modifiedTransformedPrompt"]
+        self.assertIn("cheap model is slow", out)
+        self.assertIn("Claude Sonnet 5.5", out)
+        self.assertIn("Do not use the accurate tier", out)
+        self.assertIn("slow", run([("gpt-5.4-nano", 90, "agent")] * 3))
+        # Fast cheap calls, too few samples, slow non-cheap or sub-agent calls, or disabled: stay quiet.
+        self.assertEqual(run([("gpt-5.6-luna", 5, "agent")] * 5), "{}")
+        self.assertEqual(run([("gpt-5.6-luna", 90, "agent")] * 2), "{}")
+        self.assertEqual(run([("claude-sonnet-5.5", 90, "agent")] * 5), "{}")
+        self.assertEqual(run([("gpt-5.6-luna", 90, "sub-agent")] * 5), "{}")
+        self.assertEqual(run(slow, {"SPEND_GUARD_SLOW_SECONDS": "0"}), "{}")
+
+    def test_guard_steps_up_mid_task_when_cheap_model_exceeds_its_budget(self):
+        S.apply(self.dir, PLAN)
+        home = Path(self.tmp.name) / "home"
+        d = home / "session-state" / "s1"
+        d.mkdir(parents=True)
+        hook = str(self.dir / ".github" / "hooks" / "spend_guard.py")
+        env = dict(os.environ, COPILOT_HOME=str(home), SPEND_GUARD_SKIP_UPDATE_CHECK="1")
+        state = home / "spend-guard" / "tasks" / "s1.json"
+        history = home / "spend-guard" / "task-times.json"
+
+        def hook_run(mode, payload=None, extra_env=None):
+            args = [sys.executable, hook] + ([mode] if mode else [])
+            out = subprocess.run(args, input=json.dumps({"sessionId": "s1", **(payload or {})}).encode(),
+                                 capture_output=True, env={**env, **(extra_env or {})}, timeout=20)
+            return out.stdout.decode()
+
+        def new_task(prompt, calls, started_ago=1000):
+            (d / "events.jsonl").write_text("", encoding="utf-8")
+            hook_run("", {"transformedPrompt": prompt, "prompt": prompt, "cwd": str(self.dir)})
+            recs = [{"type": "user.message", "data": {"content": prompt}}] + [
+                {"type": "session.usage_record", "data": {"usage": {
+                    "model": m, "duration": secs * 1000, "inputTokens": 5_000, "initiator": "agent"}}}
+                for m, secs in calls]
+            (d / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+            task = json.loads(state.read_text(encoding="utf-8"))
+            task["start"] -= started_ago
+            state.write_text(json.dumps(task), encoding="utf-8")
+            return task
+
+        # Pre-calculated: a routine task is expected to take 60s of cheap-model time; budget is 2x.
+        task = new_task("show the git status", [("gpt-5.6-luna", 50)] * 4)
+        self.assertEqual((task["kind"], task["expected"], task["budget"]), ("routine", 60, 120))
+        out = json.loads(hook_run("tool"))["additionalContext"]
+        self.assertIn("~200s of cheap-model time; similar tasks take ~60s", out)
+        self.assertIn("Step up one tier now", out)
+        self.assertIn("Claude Sonnet 5.5", out)
+        self.assertEqual(hook_run("tool"), "{}")  # only once per task
+        hook_run("stop")
+        self.assertFalse(history.exists())  # stepped-up tasks do not teach the expectation
+
+        self.assertEqual(new_task("add a feature", [("gpt-5.6-luna", 50)] * 4)["kind"], "code")
+        self.assertEqual(hook_run("tool"), "{}")  # 200s is within a code task's 480s budget
+        new_task("show the git status", [("gpt-5.6-luna", 50)] * 4, started_ago=10)
+        self.assertEqual(hook_run("tool"), "{}")  # wall clock not past the budget yet
+        new_task("show the git status", [("gpt-5.6-luna", 50)] * 4 + [("claude-sonnet-5.5", 5)])
+        self.assertEqual(hook_run("tool"), "{}")  # already stepped up
+        new_task("show the git status", [("gpt-5.6-luna", 50)] * 4)
+        self.assertEqual(hook_run("tool", extra_env={"SPEND_GUARD_BUDGET_FACTOR": "0"}), "{}")
+
+        # Completed in-budget tasks become the expectation for the next task of that kind.
+        for _ in range(5):
+            new_task("show the git status", [("gpt-5.6-luna", 4)] * 3)
+            hook_run("stop")
+            hook_run("stop")
+        self.assertEqual(json.loads(history.read_text(encoding="utf-8")), {"routine": [12.0] * 5})
+        task = new_task("show the git status", [("gpt-5.6-luna", 10)] * 4)
+        self.assertEqual((task["expected"], task["budget"]), (12, 30))
+        self.assertIn("similar tasks take ~12s", json.loads(hook_run("tool"))["additionalContext"])
+
+    def test_hook_and_dispatch_share_the_task_classifier(self):
+        S.apply(self.dir, PLAN)
+        self.assertIn(S.TASK_KIND_PY, (self.dir / ".github" / "hooks" / "spend_guard.py").read_text(encoding="utf-8"))
+        hooks = json.loads(self.read(".github/hooks/spend-guard.json"))["hooks"]
+        self.assertIn("spend_guard.py tool", hooks["postToolUse"][0]["powershell"])
+        self.assertIn("spend_guard.py stop", hooks["agentStop"][0]["bash"])
+
+    def test_slow_model_rule_reaches_every_entry_point(self):
+        S.apply(self.dir, {**PLAN, "providers": ["copilot", "claude"]})
+        for rel in (".github/agents/billing.agent.md", ".claude/skills/spend-guard/SKILL.md"):
+            self.assertIn(S.SLOW_MODEL_RULE, self.read(rel), rel)
+
     def test_guard_prompts_upgrade_once_per_day(self):
         S.apply(self.dir, PLAN)
         home = Path(self.tmp.name) / "home"
