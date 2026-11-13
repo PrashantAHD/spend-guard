@@ -1,4 +1,4 @@
-﻿"""Spend-Guard: keeps coding-agent AI spend down by giving every task the right model for the job.
+"""Spend-Guard: keeps coding-agent AI spend down by giving every task the right model for the job.
 
 Sets up a project so routine work runs on a low-cost model and only the work that needs it
 (writing code, security reviews, accuracy-critical reading) goes to stronger models, and keeps
